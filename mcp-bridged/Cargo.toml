@@ -1,0 +1,28 @@
+[package]
+name = "mcp-bridged"
+version = "0.1.0"
+description = "MCP Bridge — Stable-Loopback Bridge daemon"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Single binary, multiple modes (docs/DAEMON.md §10). Binary name differs from
+# package name: package is `mcp-bridged`, CLI invocation is `mcp-bridge`.
+[[bin]]
+name = "mcp-bridge"
+path = "src/main.rs"
+
+[lib]
+name = "mcp_bridged"
+path = "src/lib.rs"
+
+# Phase 1 scaffold deps only. The full frozen-for-v1 dep set lives in
+# docs/DAEMON.md §12 and lands module-by-module as subsystems are implemented.
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }

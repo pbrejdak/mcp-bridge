@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["mcp-bridged"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/mcp-bridge/mcp-bridge"
+authors = ["MCP Bridge contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints we accept noise from on purpose:
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# Project jargon (Ed25519, X25519, JSON-RPC, WebView2, MCPBridge, …) is
+# bare-identifier-shaped and would otherwise need backticks everywhere.
+doc_markdown = "allow"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

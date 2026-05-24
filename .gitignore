@@ -1,0 +1,40 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment
+.env
+.env.local
+*.local
+
+# Build artefacts
+/dist
+/out
+
+# Coverage
+*.profraw
+/coverage
+
+# Diagnostic dumps (never commit user-collected diagnostic bundles)
+diagnostics-*.zip
