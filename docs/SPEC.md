@@ -393,10 +393,11 @@ Reserved for future versions: `origin-throttled`, `origin-degraded`.
 
 ### 8.4 SAS wordlist
 
-The wordlist used by §4.2 is **MCP-Bridge SAS wordlist v1**. The canonical fixture lives at `test-vectors/sas-wordlist-v1.txt`. Properties:
+The wordlist used by §4.2 is the **BIP39 English wordlist** adopted verbatim. The canonical fixture lives at [`test-vectors/sas-wordlist-v1.txt`](../test-vectors/sas-wordlist-v1.txt); see [`test-vectors/README.md`](../test-vectors/README.md) for sourcing, license, and adoption rationale. Properties:
 
 - Exactly 2048 entries.
-- All entries are lowercase ASCII, 4–8 characters, no homoglyph pairs.
+- All entries are lowercase ASCII, 3–8 characters, no homoglyph pairs, distinct phonetic profiles.
+- SHA-256 of the canonical fixture: `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`.
 - Stable across patches; a new wordlist requires a new `mcp-pair` minor version.
 
 ---
