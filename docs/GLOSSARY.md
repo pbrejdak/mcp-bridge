@@ -258,13 +258,13 @@ The working title for the architectural pattern MCP Bridge implements: a small R
 ## T
 
 ### Tauri
-The cross-platform desktop-app framework (Rust core + native WebView UI) on which [Bridge Console](#bridge-console) is built. Chosen over Electron for binary size and security posture. See [UI.md](UI.md), [decisions/0002-tauri-over-electron](decisions/0002-tauri-over-electron.md).
+The cross-platform desktop-app framework (Rust core + native WebView UI) on which [Bridge Console](#bridge-console) is built. Chosen over Electron for binary size and security posture. See [UI.md](UI.md), [decisions/0002-tauri-over-electron.md](decisions/0002-tauri-over-electron.md).
 
 ### `target_resolver_pubkey`
 The field inside a [Direction B](#direction-b) pair payload that binds the payload to one specific Resolver. The Resolver rejects payloads whose `target_resolver_pubkey` does not match its own public key — defeats re-targeting attacks. See [SPEC.md §4.4-§4.5](SPEC.md).
 
-### Tier B (icons)
-The icon-strategy convention adopted across the UI: per-platform native icon sets (SF Symbols on macOS, Fluent on Windows, Adwaita on Linux) rather than a single cross-platform set. See [UI.md](UI.md), [decisions/0003-tier-b-icons](decisions/0003-tier-b-icons.md).
+### Path B (icons)
+The icon-strategy convention adopted across the UI: per-platform native icon sets (SF Symbols on macOS, Fluent on Windows, Lucide on Linux) rather than a single cross-platform set. See [UI.md §8](UI.md), [decisions/0005-path-b-per-platform-icons.md](decisions/0005-path-b-per-platform-icons.md).
 
 ---
 
