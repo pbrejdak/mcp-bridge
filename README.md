@@ -42,6 +42,15 @@ MCP Bridge pushes all of that complexity into one component the user installs on
 | [NOTICE](docs/NOTICE) | Apache 2.0 attribution |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
 
+## Sponsorship
+
+MCP Bridge is independently maintained. Sponsorship funds code-signing certificates, Apple notarization, and ongoing maintenance — without it, signed installers aren't sustainable.
+
+- **[GitHub Sponsors](https://github.com/sponsors/pbrejdak)** — for individual contributors; one-click from the repo.
+- **[Open Collective](https://opencollective.com/mcp-bridge)** — for organizations that need invoices, VAT handling, or a transparent expense ledger.
+
+Commercial support and SDK integration assistance are available — contact p.brejdak@gmail.com.
+
 ## License
 
 Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](docs/NOTICE).
