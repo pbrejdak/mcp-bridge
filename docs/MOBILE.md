@@ -131,14 +131,16 @@ await BridgePeer.dispose();
 
 | Method | Semantics |
 |---|---|
-| `init(config)` | Idempotent. Creates or loads the Origin keypair from secure storage. Loads existing Resolver pins. Returns when SDK is ready to accept pair invites. |
-| `scanResolverInvite()` | Opens the camera, scans a QR until success or timeout (default 60s). Returns parsed invite. Throws on cancel / timeout. |
-| `pair(invite)` | Builds the `mcp-pair/v0.1` payload (sealed to `resolver.pubkey`, signed by Origin), POSTs to `invite.lanAddr`, awaits the daemon's response, persists the pin on success. |
-| `startAutomaticAnnounce()` | Starts a foreground announce loop. Cadence: 30s + immediate on network change. Idempotent. |
-| `stopAutomaticAnnounce()` | Stops the loop. Existing pairings stay; the daemon will mark them Unreachable until announce resumes. |
-| `announceNow()` | Fires an announce immediately. Increments `seq`. Useful after a known network event. |
-| `listPairings()` | Returns the current Resolver pins from secure storage. |
-| `unpair({ resolverPubkey })` | Removes the pin locally. The daemon side has no way to know; on next interaction the user gets a "Re-pair" prompt. |
+| `init(config)` | Idempotent. Loads or generates the Origin keypair in secure storage. Loads existing Resolver pins. **If the keypair is freshly generated but the host app's `lastKnownInstall` cookie indicates a prior install, emits `reset_after_uninstall` so the host can show "your pairings were lost on reinstall — re-pair to reconnect"** (audit M-C3). Returns when SDK is ready. |
+| `scanResolverInvite(opts?)` | Opens the camera, scans until QR detected or timeout. **Default `timeoutMs: 60000`, configurable** (audit M-H2). Throws on cancel / timeout. |
+| `pair(invite, opts?)` | Builds the `mcp-pair/v0.1` payload (sealed + signed), POSTs to `invite.lanAddr`, awaits response. **Default `timeoutMs: 15000`** (audit M-H2). **Requires `opts.userConfirmedSas: true`** — the SDK refuses to send the payload unless the host app explicitly attests that the user confirmed the SAS phrase against Bridge Console (audit M-M2 — SAS confirmation is API contract, not just design guidance). |
+| `getPendingPair()` | **Returns the in-progress invite (if any) plus its remaining lifetime, or `null`** (audit M-H1). Lets the host resume a pair flow after a crash or backgrounding. |
+| `cancelPendingPair()` | Drops any pending invite. Idempotent. |
+| `startAutomaticAnnounce()` | Starts a foreground announce loop. **30s cadence + immediate on network change via `NWPathMonitor` (iOS) / `ConnectivityManager.NetworkCallback` (Android), surfaced through KMP `expect`/`actual`** (audit M-H4). Auto-stops when the app moves to background (audit M-H3); resumes on foreground. Idempotent. |
+| `stopAutomaticAnnounce()` | Stops the loop. Pins stay; daemon marks them Unreachable until announce resumes. |
+| `announceNow(opts?)` | Fires an announce immediately. Increments `seq`. **Default per-attempt `timeoutMs: 10000`** (audit M-H2). |
+| `listPairings()` | Returns the current Resolver pins. |
+| `unpair({ resolverPubkey, notifyResolver?: boolean = true })` | Removes the pin locally. **If `notifyResolver` is true (default) and the Resolver is currently reachable, sends a best-effort `mcp-announce` record with a `revoked: true` flag** so the daemon can clean up immediately instead of waiting for the user to notice an Unreachable pin (audit M-M4). |
 | `onStatus(callback)` | Subscribes to lifecycle events. Returns an unsubscribe function. |
 | `dispose()` | Stops announce loop, closes camera, releases native handles. The Origin keypair stays in secure storage. |
 
@@ -154,9 +156,12 @@ type StatusEvent =
   | { type: "paired"; resolverPubkey: string }
   | { type: "announce_started" }
   | { type: "announce_sent"; resolverPubkey: string; seq: number }
-  | { type: "announce_failed"; resolverPubkey: string; reason: "no_network" | "no_resolver" | "sig_error" }
+  | { type: "announce_failed"; resolverPubkey: string; reason: "no_network" | "no_resolver" | "sig_error" | "timeout" }
   | { type: "auth_rotation_requested"; resolverPubkey: string }
   | { type: "unpaired"; resolverPubkey: string }
+  | { type: "reset_after_uninstall"; priorPinCount: number }   // emitted by init() when keychain is empty
+                                                                 // but the host app's persisted state says
+                                                                 // there were prior pins
   | { type: "error"; code: string; message: string; recoverable: boolean };
 ```
 
@@ -577,7 +582,7 @@ The Bridge Peer SDK observes `UIApplication.willResignActive` and stops announci
 | Origin public key | iOS Keychain | same |
 | Pinned Resolver pubkeys + display names | iOS Keychain | same |
 | `lastAnnounceSeq` per pin | App Group container or local-only `UserDefaults` | `NSFileProtectionCompleteUntilFirstUserAuthentication` |
-| Last known LAN address per Resolver | local-only `UserDefaults` | non-sensitive |
+| Last known LAN address per Resolver | local-only `UserDefaults` | **excluded from iCloud Backup via `NSURLIsExcludedFromBackupKey` on the containing plist; while individual LAN IPs are low-sensitivity, they can identify the user's home/work network and should not migrate via backup** (audit M-H5) |
 
 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` is the right access class: data is decryptable after first unlock (so announce can run in foreground without user interaction) but does not migrate to a new device via iCloud Backup. This is intentional — Resolver pins should not survive a phone migration; the user re-pairs on the new device.
 
@@ -641,7 +646,7 @@ The SDK exposes `BridgePeer.startForegroundService(notificationConfig)` and `sto
 | Origin public key | Android Keystore | same |
 | Pinned Resolver pubkeys + display names | `EncryptedSharedPreferences` | AES256_GCM |
 | `lastAnnounceSeq` per pin | `EncryptedSharedPreferences` | same |
-| Last known LAN address | `SharedPreferences` (plain — non-sensitive) | |
+| Last known LAN address | `SharedPreferences` with `android:allowBackup="false"` and `BackupAgent`-level exclusion | **excluded from Google Backup; LAN IPs can identify the user's home/work network and should not migrate via backup** (audit M-H5) |
 
 `EncryptedSharedPreferences` uses a master key stored in the Android Keystore, providing the same effective protection as iOS Keychain for the per-pin state.
 
@@ -728,7 +733,32 @@ Net effect: uninstalling the host app cleanly removes all SDK state. No further 
 
 The user must re-pair every Resolver after rotation. This is intentional friction — rotation is a serious action.
 
-### 8.7 Threat model deltas vs desktop
+### 8.7 Mobile-side egress allowlist
+
+Parallel to [`ARCHITECTURE.md`](ARCHITECTURE.md) §6.1 and [`PRIVACY.md`](PRIVACY.md) §4 (audit M-C1). The SDK's complete outbound network behaviour:
+
+**Listens on (host-app process)**:
+- Whatever port the host's MCP server is bound to — typically `https://127.0.0.1:<port>/` on the loopback interface, not on the LAN interface.
+
+**Connects outbound to**:
+- Paired Resolver LAN addresses — `invite.lanAddr` for the pair POST; cached `lastKnownLanAddr` for HTTP-fallback announces.
+
+**Multicast**:
+- `224.0.0.251:5353` — Bonjour TXT broadcast for the sealed-body announce records.
+
+That is the complete list. **The SDK never connects to the internet.** No analytics endpoints, no crash reporting, no update channel of its own. Updates ship with host-app releases through the host's normal store update mechanism (audit M-M7).
+
+### 8.8 Host MCP server isolation from sibling apps
+
+The host app's MCP server binds to `https://127.0.0.1:<port>/`. The OS routes loopback only within the same process boundary in most cases, but defense-in-depth matters (audit M-C2):
+
+- **iOS**: loopback connections from other apps in the same App Group are technically possible if both apps share the keychain access group. **Do not place the MCP server's TLS key inside an App Group keychain.** Use the default app keychain (no group) so the key is unreachable to sibling apps.
+- **Android**: loopback connections from other apps are not possible unless those apps run as the same UID (sharedUserId — deprecated and rare). Standard isolation is sufficient.
+- **Cert pinning + bearer token** provide defense-in-depth on both platforms: even if a sibling app reached the loopback port, it would not have the bearer token (held in the host app's keychain entry, which is per-app) and would fail TLS verification against the daemon's pinned cert.
+
+The SDK's pair-flow surface includes a `serverIsolation` config option that, when set to `strict` (default), refuses to start if it detects an App Group keychain attribute on the TLS key.
+
+### 8.9 Threat model deltas vs desktop
 
 Adversaries we resist on mobile that are not present on desktop:
 
@@ -773,10 +803,21 @@ What the host app must do at integration:
 
 What the host app **must not** do:
 
-- Skip the SAS confirmation. The SAS is the single OOB ceremony that defeats QR-substitution attacks ([`ARCHITECTURE.md`](ARCHITECTURE.md) C-3). Auto-confirming defeats the entire trust model.
+- Skip the SAS confirmation. The SAS is the single OOB ceremony that defeats QR-substitution attacks ([`ARCHITECTURE.md`](ARCHITECTURE.md) C-3). Auto-confirming defeats the entire trust model. **The SDK now enforces this at the API level — `pair(invite, { userConfirmedSas: true })` is required and the SDK refuses to send otherwise** (audit M-M2).
 - Store the Origin private key anywhere outside the SDK-managed Keychain / Keystore.
 - Reuse one Origin keypair across multiple users on the same host app — if the host has user accounts, generate one Origin keypair per user account.
 - Expose the host's MCP server outside the loopback / LAN to the internet without explicit user consent.
+- Place the host's MCP-server TLS key in an iOS App Group keychain (audit M-C2). Sibling apps in the same group would gain access.
+- Configure a crash reporter (Crashlytics, Sentry, Bugsnag, Firebase) to capture full process memory without scrubbing. **Sensitive data the SDK touches** — unwrapped pair payloads, bearer tokens, Origin private-key handles — **can be in memory at crash time and would leak via the crash report**. Host apps should either disable memory snapshots for the SDK's threads or apply a beforeSend hook that strips fields matching `mcp_bridge` / `bridge_peer` / `origin_keypair` / `bearer` / `resolver_pubkey` (audit M-H8).
+
+### 9.1 Multi-Origin per host app
+
+For v1, **one Origin per host-app process** (audit M-H7). Host apps that need to expose multiple distinct MCP servers should:
+
+- Run a single Origin with multiple `scope` entries and one logical MCP server that internally federates.
+- Or call `BridgePeer.init()` with a different `logicalId` per Origin context (e.g., per user account in a multi-account app), one at a time — switching Origins requires `BridgePeer.dispose()` + re-init.
+
+Multi-Origin in a single process (concurrent BridgePeer instances) is **not in v1**. The pair flow's camera state, foreground announce loop, and status stream all assume one Origin at a time.
 
 ---
 
@@ -891,6 +932,14 @@ End-to-end pairing tests are deferred to v0.3 — they need real devices on a re
 ## 13. What is not in v1
 
 - **iOS push wake-up** for background MCP serving — requires the AI client to wake the daemon to wake the phone. Architecturally interesting; not v1.
+- **.NET MAUI packaging** — planned for v0.2. NuGet wrapper over the KMP iOS xcframework + Android AAR via .NET for iOS / .NET for Android binding libraries. Largest deferred-platform audience.
+- **Tauri Mobile packaging** — planned for v0.2 or v0.3. Rust crate over UniFFI bindings to the KMP-built native binaries; natural alignment with the Rust daemon.
+- **NativeScript packaging** — on-demand; ship when a real user asks. Architecture is straightforward (npm package as NativeScript plugin wrapping the same native binaries as Capacitor and React Native).
+- **Unity packaging** — interesting for AR / spatial / sensor-heavy non-game apps; defer to v0.3+ unless specific demand.
+- **watchOS / Wear OS** — wearables as Origins is intriguing for health/fitness data but the SAS confirmation UX and constrained Bonjour stack make this awkward. Defer; revisit when desktop side has matured.
+- **visionOS** — should fall out of the iOS xcframework automatically when KMP's `iosArm64` target adds a `visionOS` slice; no separate packaging needed. Confirm during the v0.2 build pipeline work.
+- **Xamarin Classic** — deprecated; not supported. Migrate to MAUI.
+- **Embedded (ESP32, Arduino, RTOS)** — different design space; out of scope for this SDK. Would require a stripped-trust-model "bridge-microcontroller" SDK as a separate project.
 - **WatchOS / WearOS hosts** — phones only.
 - **Cross-device origin migration** — the user re-pairs on a new phone; we don't help them migrate.
 - **Multi-tenant host apps** — one Origin identity per host app. Host apps with multiple user accounts need to manage that themselves by calling `init()` with a different `logicalId` per user.
