@@ -105,6 +105,9 @@ SHA-256 digest of the DER-encoded leaf certificate the Origin's backend currentl
 
 ## I
 
+### Host-header check
+The [Loopback Listener](#loopback-face--loopback-listener) requirement that incoming HTTP requests carry a `Host:` header of `127.0.0.1:<port>` or `localhost:<port>` (or the IPv6 equivalents). Requests with any other `Host` value get `421 Misdirected Request` before any further processing — the defense against DNS-rebinding attacks from browser tabs. See [SPEC.md §6.2](SPEC.md).
+
 ### Identity Keystore
 The Resolver-side OS keychain wrapper that holds the Resolver keypair, per-Origin pinned public keys, per-`(Origin, Consumer)` loopback keys, and bearer tokens. See [ARCHITECTURE.md §3.1](ARCHITECTURE.md), [DAEMON.md §7.3](DAEMON.md).
 
