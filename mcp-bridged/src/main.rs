@@ -91,7 +91,5 @@ fn main() -> Result<()> {
 }
 
 fn not_implemented(subcommand: &str) -> Result<()> {
-    bail!(
-        "subcommand `{subcommand}` is not implemented yet — see docs/ROADMAP.md Phase 1"
-    );
+    bail!("subcommand `{subcommand}` is not implemented yet — see docs/ROADMAP.md Phase 1");
 }
