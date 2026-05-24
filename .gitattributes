@@ -1,0 +1,15 @@
+# Spec conformance fixtures must be byte-exact across platforms — the
+# wordlist SHA-256 pinned in docs/SPEC.md §8.4 and verified by CI assumes
+# LF line endings everywhere.
+test-vectors/** text eol=lf
+
+# Rust source and Cargo manifests: LF, normalize on commit.
+*.rs       text eol=lf
+*.toml     text eol=lf
+
+# Markdown: LF (avoids spurious diff churn on Windows clones).
+*.md       text eol=lf
+
+# YAML used for CI / templates.
+*.yml      text eol=lf
+*.yaml     text eol=lf
