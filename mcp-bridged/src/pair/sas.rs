@@ -1,4 +1,5 @@
-//! SAS (Short Authentication String) phrase derivation.
+//! SAS (Short Authentication String) phrase derivation and the typed
+//! representation of a valid phrase.
 //!
 //! Implements [`docs/SPEC.md`](../../../../docs/SPEC.md) §4.2 — derive a
 //! four-word lowercase ASCII phrase from
@@ -6,9 +7,13 @@
 //! a big-endian `u16` from successive byte pairs of `H[0..8]` modulo 2048
 //! and indexing into [`WORDLIST_V1`].
 
+use std::fmt;
+use std::str::FromStr;
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 /// Raw bytes of the SAS wordlist v1 — BIP39 English, locked at v0.1.
 ///
@@ -21,6 +26,9 @@ pub const WORDLIST_LEN: usize = 2048;
 
 /// Words drawn per derived phrase.
 pub const WORDS_PER_PHRASE: usize = 4;
+
+/// Separator between words in the encoded phrase.
+pub const WORD_SEPARATOR: char = '-';
 
 static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
 
@@ -38,11 +46,83 @@ fn words() -> &'static [&'static str] {
         .as_slice()
 }
 
-/// Derive the four-word SAS phrase for a `(resolver_pubkey, nonce)` pair.
+/// A four-word SAS phrase known to be drawn from [`WORDLIST_V1`].
 ///
-/// Returns a lowercase ASCII string of the form `word1-word2-word3-word4`,
-/// each part drawn from [`WORDLIST_V1`].
-pub fn derive(resolver_pubkey: &[u8; 32], nonce: &[u8; 16]) -> String {
+/// Public material — the phrase is shown on screen for the user to confirm,
+/// so it leaves the process anyway. No zeroize required.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Sas(String);
+
+impl Sas {
+    /// Construct from an already-validated string. Internal-only; callers
+    /// outside this module go through [`Sas::from_str`].
+    fn from_validated(s: String) -> Self {
+        Self(s)
+    }
+
+    /// Borrow the encoded phrase.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Sas {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for Sas {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Sas").field(&self.0).finish()
+    }
+}
+
+impl FromStr for Sas {
+    type Err = SasError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split(WORD_SEPARATOR).collect();
+        if parts.len() != WORDS_PER_PHRASE {
+            return Err(SasError::WrongWordCount { got: parts.len() });
+        }
+        let table = words();
+        for part in &parts {
+            if !table.contains(part) {
+                return Err(SasError::UnknownWord {
+                    word: (*part).to_owned(),
+                });
+            }
+        }
+        Ok(Self::from_validated(s.to_owned()))
+    }
+}
+
+impl Serialize for Sas {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sas {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <&str>::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Failure modes for [`Sas::from_str`].
+#[derive(Debug, Error)]
+pub enum SasError {
+    #[error("expected {WORDS_PER_PHRASE} words separated by `{WORD_SEPARATOR}`, got {got}")]
+    WrongWordCount { got: usize },
+    #[error("word `{word}` is not in the SAS wordlist v1")]
+    UnknownWord { word: String },
+}
+
+/// Derive the four-word SAS phrase for a `(resolver_pubkey, nonce)` pair.
+pub fn derive(resolver_pubkey: &[u8; 32], nonce: &[u8; 16]) -> Sas {
     let mut hasher = Sha256::new();
     hasher.update(resolver_pubkey);
     hasher.update(nonce);
@@ -56,7 +136,7 @@ pub fn derive(resolver_pubkey: &[u8; 32], nonce: &[u8; 16]) -> String {
             table[(raw as usize) % WORDLIST_LEN]
         })
         .collect();
-    parts.join("-")
+    Sas::from_validated(parts.join(&WORD_SEPARATOR.to_string()))
 }
 
 #[cfg(test)]
@@ -86,7 +166,7 @@ mod tests {
     #[test]
     fn derive_returns_four_dash_joined_words_from_the_wordlist() {
         let phrase = derive(&[0u8; 32], &[0u8; 16]);
-        let parts: Vec<&str> = phrase.split('-').collect();
+        let parts: Vec<&str> = phrase.as_str().split(WORD_SEPARATOR).collect();
         assert_eq!(parts.len(), WORDS_PER_PHRASE);
         for part in parts {
             assert!(words().contains(&part), "{part:?} is not in WORDLIST_V1");
@@ -126,7 +206,7 @@ mod tests {
     #[test]
     fn kat_all_zeros() {
         assert_eq!(
-            derive(&[0u8; 32], &[0u8; 16]),
+            derive(&[0u8; 32], &[0u8; 16]).as_str(),
             "voyage-sentence-voyage-deny"
         );
     }
@@ -140,8 +220,35 @@ mod tests {
     #[test]
     fn kat_aa_pubkey_55_nonce() {
         assert_eq!(
-            derive(&[0xAAu8; 32], &[0x55u8; 16]),
+            derive(&[0xAAu8; 32], &[0x55u8; 16]).as_str(),
             "wisdom-shrug-parade-body"
         );
+    }
+
+    #[test]
+    fn sas_parses_a_valid_phrase() {
+        let s: Sas = "voyage-sentence-voyage-deny".parse().unwrap();
+        assert_eq!(s.as_str(), "voyage-sentence-voyage-deny");
+    }
+
+    #[test]
+    fn sas_rejects_wrong_word_count() {
+        let r: Result<Sas, _> = "voyage-sentence-voyage".parse();
+        assert!(matches!(r, Err(SasError::WrongWordCount { got: 3 })));
+    }
+
+    #[test]
+    fn sas_rejects_unknown_word() {
+        let r: Result<Sas, _> = "voyage-sentence-voyage-NOTAWORD".parse();
+        assert!(matches!(r, Err(SasError::UnknownWord { .. })));
+    }
+
+    #[test]
+    fn sas_serde_round_trip() {
+        let s = derive(&[0u8; 32], &[0u8; 16]);
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"voyage-sentence-voyage-deny\"");
+        let back: Sas = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
     }
 }

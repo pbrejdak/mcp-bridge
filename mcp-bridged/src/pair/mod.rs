@@ -7,4 +7,8 @@
 //! [`docs/SPEC.md`]: ../../../../docs/SPEC.md
 //! [`docs/DAEMON.md`]: ../../../../docs/DAEMON.md
 
+pub mod nonce;
 pub mod sas;
+
+pub use nonce::Nonce;
+pub use sas::Sas;
