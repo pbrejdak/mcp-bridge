@@ -7,8 +7,12 @@
 //! [`docs/SPEC.md`]: ../../../../docs/SPEC.md
 //! [`docs/DAEMON.md`]: ../../../../docs/DAEMON.md
 
+pub mod invite;
+pub mod lan_addr;
 pub mod nonce;
 pub mod sas;
 
+pub use invite::{Direction, Invite, ResolverInfo, SpecVersion};
+pub use lan_addr::LanAddr;
 pub use nonce::Nonce;
 pub use sas::Sas;
