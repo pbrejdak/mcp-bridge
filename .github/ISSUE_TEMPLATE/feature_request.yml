@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose a user-visible change to MCP Bridge.
+title: "feat: <short summary>"
+labels: ["feature", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request:
+
+        - **Wire-protocol / IPC changes** require an RFC, not a feature request. See [docs/CONTRIBUTING.md §3.4](../blob/main/docs/CONTRIBUTING.md).
+        - **Open a Discussion first** for anything substantial — it's easier to iterate on an idea there than in an issue.
+        - Per [docs/CONTRIBUTING.md §3.2](../blob/main/docs/CONTRIBUTING.md), reference the design principle ([docs/UX.md §1](../blob/main/docs/UX.md)) the request satisfies, or explain why an existing principle should change.
+
+        We are **slow** to accept new optional features that grow the maintenance surface. We are **fast** to accept bug fixes, security improvements, and documentation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user-visible problem does this solve? Whose pain is this?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should Bridge do? Keep it concrete.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else would address the problem? Why did you rule them out?
+
+  - type: textarea
+    id: principle
+    attributes:
+      label: Design-principle alignment
+      description: |
+        Which principle from [docs/UX.md §1](../blob/main/docs/UX.md) does this satisfy? If you believe an existing principle should change, say which and why.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: "This does NOT require Bridge to talk to a new outside endpoint."
+        - label: "This does NOT require Bridge to store new data."
+        - label: "This does NOT change the trust model."
+        - label: "If any of the above is unchecked, I understand this needs an RFC instead (docs/CONTRIBUTING.md §3.4)."
+          required: true

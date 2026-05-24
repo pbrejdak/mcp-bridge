@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security or privacy vulnerability
+    url: https://github.com/mcp-bridge/mcp-bridge/security/policy
+    about: |
+      Do NOT open a public issue for security or privacy vulnerabilities.
+      Follow the responsible-disclosure process in docs/SECURITY.md.
+  - name: Wire-protocol RFC
+    url: https://github.com/mcp-bridge/mcp-bridge/discussions
+    about: |
+      Changes to mcp-pair, mcp-announce, or the IPC surface require an RFC
+      opened as a GitHub Discussion. See docs/CONTRIBUTING.md §3.4.
+  - name: Question or general discussion
+    url: https://github.com/mcp-bridge/mcp-bridge/discussions
+    about: |
+      For questions, ideas, or design conversations, open a discussion
+      rather than an issue.

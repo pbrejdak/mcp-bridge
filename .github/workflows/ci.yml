@@ -1,0 +1,100 @@
+# CI for MCP Bridge.
+#
+# Matches the required checks listed in docs/CONTRIBUTING.md §10:
+#   - cargo fmt --all -- --check
+#   - cargo clippy --all-targets -- -D warnings
+#   - cargo test --workspace
+#   - cargo deny check
+#
+# DCO sign-off enforcement is done by the DCO GitHub App
+# (https://probot.github.io/apps/dco/), not by this workflow — installation
+# happens once at the org level.
+#
+# SLSA provenance is built by the release workflow, not here.
+#
+# Platform matrix: Linux only for the Phase 1 scaffold (no platform-specific
+# code yet). Expand to macOS + Windows once proxy::listener, keystore, and
+# the platform-specific announce backends land — see docs/ROADMAP.md.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --workspace -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  spec-fixtures:
+    name: spec fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAS wordlist line count
+        run: |
+          lines=$(wc -l < test-vectors/sas-wordlist-v1.txt)
+          if [ "$lines" -ne 2048 ]; then
+            echo "::error::sas-wordlist-v1.txt must have exactly 2048 lines, has $lines"
+            exit 1
+          fi
+      - name: SAS wordlist SHA-256
+        run: |
+          expected="2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda"
+          actual=$(sha256sum test-vectors/sas-wordlist-v1.txt | cut -d' ' -f1)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::sas-wordlist-v1.txt SHA-256 drift — expected $expected, got $actual"
+            exit 1
+          fi
