@@ -83,8 +83,11 @@ impl Serialize for LanAddr {
 
 impl<'de> Deserialize<'de> for LanAddr {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = <&str>::deserialize(deserializer)?;
-        Self::new(s).map_err(serde::de::Error::custom)
+        // Owned String here, not `&str`: borrowed deserialization fails when
+        // the value flows through `serde_json::Value` or any other deserializer
+        // that does not buffer the input bytes.
+        let s = String::deserialize(deserializer)?;
+        Self::new(&s).map_err(serde::de::Error::custom)
     }
 }
 

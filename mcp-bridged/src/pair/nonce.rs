@@ -79,7 +79,10 @@ impl Serialize for Nonce {
 
 impl<'de> Deserialize<'de> for Nonce {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = <&str>::deserialize(deserializer)?;
+        // Owned String here, not `&str`: borrowed deserialization fails when
+        // the value flows through `serde_json::Value` or any other deserializer
+        // that does not buffer the input bytes.
+        let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
     }
 }
