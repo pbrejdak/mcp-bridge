@@ -7,6 +7,7 @@
 //! [`docs/SPEC.md`]: ../../../../docs/SPEC.md
 //! [`docs/DAEMON.md`]: ../../../../docs/DAEMON.md
 
+pub mod accept;
 pub mod auth;
 pub mod backend_url;
 pub mod bearer_token;
@@ -20,6 +21,7 @@ pub mod payload;
 pub mod sas;
 pub mod seal;
 
+pub use accept::{AcceptError, accept_direction_b};
 pub use auth::{Auth, AuthType};
 pub use backend_url::BackendUrl;
 pub use bearer_token::BearerToken;
