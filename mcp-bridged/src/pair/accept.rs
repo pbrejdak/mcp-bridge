@@ -1,9 +1,10 @@
 //! Single-entry orchestration of Direction-B pair acceptance.
 //!
 //! Composes [`super::seal::open_with`], JSON deserialization,
-//! [`super::PairPayload::validate_direction_b`], and
-//! [`super::InviteRegister::consume`] into one async call that the HTTP
-//! pair endpoint will sit on top of.
+//! [`super::PairPayload::validate_direction_b`],
+//! [`super::InviteRegister::consume`], and
+//! [`super::local_dest::verify_request_destination`] into one async call
+//! that the HTTP pair endpoint will sit on top of.
 //!
 //! Acceptance order (chosen deliberately):
 //!   1. Open the sealed envelope (rule 7). Fails fast if the bytes were
@@ -11,13 +12,17 @@
 //!   2. Deserialize the inner JSON payload.
 //!   3. Run the cryptographic + shape validation
 //!      (rules 1, 2, 4, 5, 8 plus auth-block consistency).
-//!   4. Only on success: consume the nonce from the invite register
-//!      (rule 9).
+//!   4. Consume the nonce from the invite register (rule 9). The invite
+//!      it returns carries the `lan_addr` the Resolver advertised.
+//!   5. Verify the request arrived on that `lan_addr` (rule 10).
 //!
-//! Putting consume last means a malformed or forged payload does NOT
-//! burn a legitimate user's pending invite. A legitimate Origin whose
-//! signature is correct succeeds in step 4; an attacker whose payload
-//! never verifies cannot exhaust nonces.
+//! Putting consume after validate means a malformed or forged payload
+//! does NOT burn a legitimate user's pending invite. Rule 10 sits at
+//! the very end because it is the cheapest local check and the one
+//! most reliant on the runtime context (the `local_addr` the listener
+//! passes in).
+
+use std::net::SocketAddr;
 
 use thiserror::Error;
 
@@ -25,10 +30,15 @@ use crate::identity::Keypair;
 
 use super::PairPayload;
 use super::invite_register::{self, InviteRegister};
+use super::local_dest::{self, DestinationError};
 use super::payload::ValidationError;
 use super::seal::{self, OpenError};
 
 /// Accept a Direction-B sealed pair payload end-to-end.
+///
+/// `local_addr` is the destination socket the request actually arrived
+/// on — the HTTP listener pulls it from axum's `ConnectInfo<SocketAddr>`
+/// (or equivalent) and forwards it here.
 ///
 /// Returns the fully-validated [`PairPayload`] on success. The caller
 /// uses it to build the Server Pin and write Consumer adapter entries.
@@ -36,11 +46,13 @@ pub async fn accept_direction_b(
     sealed: &[u8],
     resolver: &Keypair,
     invites: &InviteRegister,
+    local_addr: SocketAddr,
 ) -> Result<PairPayload, AcceptError> {
     let plaintext = seal::open_with(sealed, resolver)?;
     let payload: PairPayload = serde_json::from_slice(&plaintext)?;
     payload.validate_direction_b(resolver.pubkey())?;
-    invites.consume(payload.nonce).await?;
+    let invite = invites.consume(payload.nonce).await?;
+    local_dest::verify_request_destination(local_addr, &invite.resolver.lan_addr)?;
     Ok(payload)
 }
 
@@ -55,6 +67,8 @@ pub enum AcceptError {
     Validation(#[from] ValidationError),
     #[error("nonce does not match an active invite: {0}")]
     Invite(#[from] invite_register::Error),
+    #[error("request destination does not match invite: {0}")]
+    Destination(#[from] DestinationError),
 }
 
 #[cfg(test)]
@@ -128,6 +142,11 @@ mod tests {
         seal::seal_to(&plaintext, receiver).unwrap()
     }
 
+    /// Matches the lan_addr `build_pair_for` puts in every invite.
+    fn matching_local() -> SocketAddr {
+        "10.0.0.5:8765".parse().unwrap()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn happy_path_returns_validated_payload_and_consumes_nonce() {
         let cancel = CancellationToken::new();
@@ -138,14 +157,14 @@ mod tests {
         invites.register(invite).await.unwrap();
         let sealed = seal_payload(&payload, resolver.pubkey());
 
-        let accepted = accept_direction_b(&sealed, &resolver, &invites)
+        let accepted = accept_direction_b(&sealed, &resolver, &invites, matching_local())
             .await
             .unwrap();
         assert_eq!(accepted, payload);
 
         // A second attempt with the same nonce must fail — the nonce was
         // consumed on the first acceptance.
-        let err = accept_direction_b(&sealed, &resolver, &invites)
+        let err = accept_direction_b(&sealed, &resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -169,7 +188,7 @@ mod tests {
         // payload arrives at the imposter Resolver.
         let sealed = seal_payload(&payload, actual_resolver.pubkey());
 
-        let err = accept_direction_b(&sealed, &imposter_resolver, &invites)
+        let err = accept_direction_b(&sealed, &imposter_resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(err, AcceptError::Seal(_)));
@@ -192,7 +211,7 @@ mod tests {
         payload.sig = Signature::from_bytes(sig_bytes);
 
         let sealed = seal_payload(&payload, resolver.pubkey());
-        let err = accept_direction_b(&sealed, &resolver, &invites)
+        let err = accept_direction_b(&sealed, &resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(err, AcceptError::Validation(_)));
@@ -215,7 +234,7 @@ mod tests {
         let (_invite, payload, _origin) = build_pair_for(&resolver);
         let sealed = seal_payload(&payload, resolver.pubkey());
 
-        let err = accept_direction_b(&sealed, &resolver, &invites)
+        let err = accept_direction_b(&sealed, &resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -239,7 +258,7 @@ mod tests {
         tokio::time::advance(INVITE_LIFETIME + Duration::from_secs(1)).await;
 
         let sealed = seal_payload(&payload, resolver.pubkey());
-        let err = accept_direction_b(&sealed, &resolver, &invites)
+        let err = accept_direction_b(&sealed, &resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -296,7 +315,7 @@ mod tests {
         payload.sig = origin.sign(&canonical);
 
         let sealed = seal_payload(&payload, resolver.pubkey());
-        let err = accept_direction_b(&sealed, &resolver, &invites)
+        let err = accept_direction_b(&sealed, &resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(err, AcceptError::Validation(_)));
@@ -313,10 +332,30 @@ mod tests {
         // Seal some bytes that decrypt successfully but are not valid JSON.
         let garbage = seal::seal_to(b"this is not json", resolver.pubkey()).unwrap();
 
-        let err = accept_direction_b(&garbage, &resolver, &invites)
+        let err = accept_direction_b(&garbage, &resolver, &invites, matching_local())
             .await
             .unwrap_err();
         assert!(matches!(err, AcceptError::Deserialize(_)));
+
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wrong_local_destination_is_rejected_after_consume() {
+        let cancel = CancellationToken::new();
+        let invites = InviteRegister::spawn(cancel.clone());
+        let resolver = Keypair::generate();
+
+        let (invite, payload, _origin) = build_pair_for(&resolver);
+        invites.register(invite).await.unwrap();
+        let sealed = seal_payload(&payload, resolver.pubkey());
+
+        // Invite advertised 10.0.0.5:8765; request arrived on a different port.
+        let wrong: SocketAddr = "10.0.0.5:9999".parse().unwrap();
+        let err = accept_direction_b(&sealed, &resolver, &invites, wrong)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcceptError::Destination(_)));
 
         cancel.cancel();
     }

@@ -15,6 +15,7 @@ pub mod cert_fingerprint;
 pub mod invite;
 pub mod invite_register;
 pub mod lan_addr;
+pub mod local_dest;
 pub mod logical_id;
 pub mod nonce;
 pub mod payload;

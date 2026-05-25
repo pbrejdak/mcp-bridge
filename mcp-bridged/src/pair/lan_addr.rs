@@ -40,6 +40,23 @@ impl LanAddr {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Host portion of the URL, as it appears in the authority section
+    /// (e.g. `10.0.0.5`, `[fe80::1]`, `patryk.local`).
+    ///
+    /// IPv6 literals include their surrounding brackets.
+    #[must_use]
+    pub fn host_str(&self) -> &str {
+        self.0.host_str().expect("LanAddr::new requires a host")
+    }
+
+    /// Explicit port from the URL, or 443 (the HTTPS default) if none was
+    /// supplied. SPEC.md §4.2 examples include an explicit port; the
+    /// fallback makes the accessor total.
+    #[must_use]
+    pub fn port_or_default(&self) -> u16 {
+        self.0.port().unwrap_or(443)
+    }
 }
 
 /// Accept only IP literals (v4 or v6) and `.local`-suffixed hostnames per
