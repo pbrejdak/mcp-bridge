@@ -1,0 +1,17 @@
+{
+  "name": "accept-with-optional-uri",
+  "description": "Invite carrying the optional `uri` field with the universal-link form. SPEC.md §4.2 marks uri as optional; a conforming Resolver MUST accept this and preserve the uri through round-trip.",
+  "expect": "accept",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
+    "uri": "mcp-pair://abc123"
+  }
+}

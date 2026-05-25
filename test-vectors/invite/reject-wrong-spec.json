@@ -1,0 +1,16 @@
+{
+  "name": "reject-wrong-spec",
+  "description": "Invite with `spec` value the implementation does not support. SPEC.md §3.5: receivers MUST reject any payload whose `spec` value does not exactly match a version they implement.",
+  "expect": "reject",
+  "payload": {
+    "spec": "mcp-pair/v9.99",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

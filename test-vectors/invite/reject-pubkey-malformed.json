@@ -1,0 +1,16 @@
+{
+  "name": "reject-pubkey-malformed",
+  "description": "Invite where `resolver.pubkey` is missing the `ed25519:` prefix required by SPEC.md §3.2. A conforming Resolver MUST reject.",
+  "expect": "reject",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

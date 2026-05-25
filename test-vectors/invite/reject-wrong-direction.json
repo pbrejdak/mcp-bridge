@@ -1,0 +1,16 @@
+{
+  "name": "reject-wrong-direction",
+  "description": "Invite with a `direction` value that is not one of the SPEC.md §4.1 enumerated values (`resolver_offered`, `origin_offered`). A conforming Resolver MUST reject.",
+  "expect": "reject",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "sideways",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

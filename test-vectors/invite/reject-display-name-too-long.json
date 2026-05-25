@@ -1,0 +1,16 @@
+{
+  "name": "reject-display-name-too-long",
+  "description": "Invite where `resolver.display_name` is 65 grapheme clusters (one over the SPEC.md §4.2 limit of 64). A conforming Resolver MUST reject.",
+  "expect": "reject",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "reject-lan-addr-public-dns",
+  "description": "Invite where `resolver.lan_addr` host is a public DNS name (`example.com`) rather than an IP literal or `.local` hostname. SPEC.md §4.2: `MUST NOT be a public DNS name`. A conforming Resolver MUST reject.",
+  "expect": "reject",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://example.com/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

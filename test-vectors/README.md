@@ -4,11 +4,31 @@ This directory holds the normative fixtures that every conforming Origin and Res
 
 ## Files
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
 | [`sas-wordlist-v1.txt`](sas-wordlist-v1.txt) | The 2048-word lowercase ASCII wordlist used by the SAS derivation in [`docs/SPEC.md`](../docs/SPEC.md) §4.2. **Locked at v0.1** — any change requires a new minor version of `mcp-pair`. |
+| [`invite/`](invite/) | Direction-B `mcp-pair/v0.1` invite acceptance / rejection fixtures ([SPEC §4.2](../docs/SPEC.md)). |
 
-Fixture suites for pair-payload acceptance, announce sequences, replay/stale-clock rejection, and RFC 8785 canonicalization will land here as Phase 1 progresses.
+Fixture suites for sealed pair-payload acceptance, announce sequences, replay/stale-clock rejection, and RFC 8785 canonicalization will land here as Phase 1 progresses.
+
+## Fixture file format
+
+Every JSON fixture under a per-subprotocol directory (e.g. [`invite/`](invite/)) is a self-documenting wrapper:
+
+```jsonc
+{
+  "name": "kebab-case-id",
+  "description": "Plain prose explaining what this case tests and why.",
+  "expect": "accept" | "reject",
+  "payload": { /* the actual mcp-pair/v0.1 payload under test */ }
+}
+```
+
+Conformance harnesses iterate every `*.json` file in the directory, deserialize the wrapper, and run `payload` through the implementation under test. The result MUST agree with `expect`. Accept-cases additionally MUST survive a re-serialize / re-deserialize round-trip without loss.
+
+The Rust reference harness lives in [`mcp-bridged/tests/invite_conformance.rs`](../mcp-bridged/tests/invite_conformance.rs); other-language SDKs are expected to ship their own walker over the same fixture tree.
+
+Adding a fixture is two steps: drop a new JSON file in the appropriate subdirectory and write a clear `description`. The harness picks it up automatically — no code change.
 
 ## `sas-wordlist-v1.txt`
 

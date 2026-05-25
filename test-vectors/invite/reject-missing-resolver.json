@@ -1,0 +1,10 @@
+{
+  "name": "reject-missing-resolver",
+  "description": "Invite missing the required `resolver` object. SPEC.md §4.2 lists `resolver` as required (no `OPTIONAL` annotation). A conforming Resolver MUST reject.",
+  "expect": "reject",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

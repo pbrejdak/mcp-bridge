@@ -1,0 +1,16 @@
+{
+  "name": "accept-canonical",
+  "description": "The canonical Direction-B invite (SPEC.md §4.2 example shape with the all-zeros pubkey + nonce used by the SAS KAT). A conforming Resolver MUST accept this.",
+  "expect": "accept",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  }
+}

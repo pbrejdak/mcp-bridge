@@ -1,0 +1,17 @@
+{
+  "name": "accept-with-unknown-field",
+  "description": "Invite carrying an unknown top-level field `experimental_xyz`. SPEC.md §3.4: receivers MUST ignore unknown top-level fields they do not recognize. A conforming Resolver MUST accept this.",
+  "expect": "accept",
+  "payload": {
+    "spec": "mcp-pair/v0.1",
+    "direction": "resolver_offered",
+    "resolver": {
+      "pubkey": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "display_name": "Patryk's MacBook Pro",
+      "sas": "voyage-sentence-voyage-deny",
+      "lan_addr": "https://10.0.0.5:8765/pair"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
+    "experimental_xyz": {"feature": "future-extension"}
+  }
+}
