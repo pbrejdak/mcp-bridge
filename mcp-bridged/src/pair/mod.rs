@@ -10,6 +10,7 @@
 pub mod accept;
 pub mod auth;
 pub mod backend_url;
+pub mod backend_verifier;
 pub mod bearer_token;
 pub mod cert_fingerprint;
 pub mod invite;
