@@ -5,7 +5,11 @@
 //! [`docs/DAEMON.md`]: ../../../../docs/DAEMON.md
 
 pub mod display_name;
+pub mod keypair;
 pub mod pubkey;
+pub mod signature;
 
 pub use display_name::DisplayName;
+pub use keypair::{Keypair, VerifyError, verify};
 pub use pubkey::Ed25519Pubkey;
+pub use signature::Signature;
