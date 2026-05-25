@@ -18,6 +18,7 @@ pub mod logical_id;
 pub mod nonce;
 pub mod payload;
 pub mod sas;
+pub mod seal;
 
 pub use auth::{Auth, AuthType};
 pub use backend_url::BackendUrl;

@@ -50,6 +50,18 @@ impl Keypair {
         let sig = self.signing.sign(message);
         Signature::from_bytes(sig.to_bytes())
     }
+
+    /// Derive the X25519 secret bytes from this Ed25519 keypair. Per RFC
+    /// 7748 + libsodium's `crypto_sign_ed25519_sk_to_curve25519`: the
+    /// scalar is `SHA-512(seed)[..32]` with the standard X25519 bit
+    /// clamping, which is exactly what `to_scalar_bytes()` returns.
+    ///
+    /// Crate-internal: callers outside `mcp_bridged` MUST NOT see this
+    /// material. Used only by [`crate::pair::seal`] to instantiate
+    /// `crypto_box::SecretKey`.
+    pub(crate) fn x25519_secret_bytes(&self) -> [u8; 32] {
+        self.signing.to_scalar_bytes()
+    }
 }
 
 impl fmt::Debug for Keypair {

@@ -34,7 +34,24 @@ impl Ed25519Pubkey {
     pub const fn as_bytes(&self) -> &[u8; LEN] {
         &self.0
     }
+
+    /// Convert this Ed25519 public key to its X25519 equivalent via the
+    /// standard Edwards-to-Montgomery map. Returns the 32-byte X25519
+    /// public key.
+    ///
+    /// Per RFC 7748 §4.1 and libsodium's
+    /// `crypto_sign_ed25519_pk_to_curve25519`. Fails if the input bytes
+    /// are not a valid Ed25519 public key (point not on the curve).
+    pub fn to_x25519_bytes(&self) -> Result<[u8; LEN], InvalidPubkey> {
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&self.0).map_err(|_| InvalidPubkey)?;
+        Ok(vk.to_montgomery().to_bytes())
+    }
 }
+
+/// The bytes do not lie on the Ed25519 curve. Carried by [`to_x25519_bytes`].
+#[derive(Debug, thiserror::Error)]
+#[error("pubkey is not on the Ed25519 curve")]
+pub struct InvalidPubkey;
 
 impl fmt::Display for Ed25519Pubkey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
