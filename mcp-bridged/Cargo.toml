@@ -25,6 +25,9 @@ path = "src/lib.rs"
 # docs/DAEMON.md §12 and lands module-by-module as subsystems are implemented.
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
 blake2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
@@ -32,6 +35,7 @@ crypto_box = "0.9"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 rcgen = "0.13"
 rand = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.1"
@@ -45,4 +49,5 @@ url = { version = "2", features = ["serde"] }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util", "net"] }

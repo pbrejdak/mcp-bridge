@@ -50,7 +50,7 @@ pub async fn accept_direction_b(
     sealed: &[u8],
     resolver: &Keypair,
     invites: &InviteRegister,
-    backend_verifier: &impl BackendVerifier,
+    backend_verifier: &(dyn BackendVerifier),
     local_addr: SocketAddr,
 ) -> Result<PairPayload, AcceptError> {
     let plaintext = seal::open_with(sealed, resolver)?;

@@ -13,6 +13,7 @@ pub mod backend_url;
 pub mod backend_verifier;
 pub mod bearer_token;
 pub mod cert_fingerprint;
+pub mod endpoint;
 pub mod invite;
 pub mod invite_register;
 pub mod lan_addr;

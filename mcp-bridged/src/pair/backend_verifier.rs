@@ -10,6 +10,7 @@
 //! trait separation lets the HTTP listener and `accept_direction_b` stay
 //! free of TLS dependencies in tests and in alternate-transport setups.
 
+use async_trait::async_trait;
 use thiserror::Error;
 
 use super::backend_url::BackendUrl;
@@ -21,9 +22,10 @@ use super::cert_fingerprint::CertFingerprint;
 /// Implementations MUST be `Send + Sync` so the HTTP listener can share
 /// one verifier across request-handling tasks.
 ///
-/// Uses native async-fn-in-trait (stable in 1.75+). Callers that need
-/// dynamic dispatch should switch to `async_trait` at that point.
-#[allow(async_fn_in_trait)]
+/// Object-safe via `#[async_trait]` so the daemon can hold an
+/// `Arc<dyn BackendVerifier>` and swap implementations at runtime
+/// (real rustls in production, stubs in tests).
+#[async_trait]
 pub trait BackendVerifier: Send + Sync {
     /// Open a TLS handshake against `url`, capture the leaf certificate,
     /// and compare its SHA-256 fingerprint to `expected_fp`. Returns
@@ -53,6 +55,7 @@ pub enum BackendVerifyError {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AlwaysAccept;
 
+#[async_trait]
 impl BackendVerifier for AlwaysAccept {
     async fn verify(
         &self,
@@ -67,6 +70,7 @@ impl BackendVerifier for AlwaysAccept {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AlwaysFingerprintMismatch;
 
+#[async_trait]
 impl BackendVerifier for AlwaysFingerprintMismatch {
     async fn verify(
         &self,
@@ -83,6 +87,7 @@ impl BackendVerifier for AlwaysFingerprintMismatch {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AlwaysUnreachable;
 
+#[async_trait]
 impl BackendVerifier for AlwaysUnreachable {
     async fn verify(
         &self,
