@@ -30,6 +30,7 @@ blake2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 crypto_box = "0.9"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+rcgen = "0.13"
 rand = "0.8"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
