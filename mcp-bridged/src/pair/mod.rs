@@ -21,6 +21,7 @@ pub mod local_dest;
 pub mod logical_id;
 pub mod nonce;
 pub mod payload;
+pub mod rustls_backend_verifier;
 pub mod sas;
 pub mod seal;
 

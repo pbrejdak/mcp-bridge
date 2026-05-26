@@ -39,6 +39,19 @@ impl BackendUrl {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Host portion of the URL (IPv4 literal, IPv6 literal with surrounding
+    /// brackets, or a hostname).
+    #[must_use]
+    pub fn host_str(&self) -> &str {
+        self.0.host_str().expect("BackendUrl::new requires a host")
+    }
+
+    /// Explicit port from the URL, or 443 (the HTTPS default) if omitted.
+    #[must_use]
+    pub fn port_or_default(&self) -> u16 {
+        self.0.port().unwrap_or(443)
+    }
 }
 
 impl fmt::Display for BackendUrl {
