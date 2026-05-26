@@ -63,6 +63,21 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
     Ok(())
 }
 
+/// Run the daemon and wire its shutdown to the host process's SIGINT /
+/// SIGTERM (Unix) or Ctrl-C (Windows).
+///
+/// The binary entry point calls this; tests that need explicit
+/// cancellation control use [`run`] directly.
+pub async fn run_with_signal_handler(config: Config) -> Result<(), DaemonError> {
+    let cancel = CancellationToken::new();
+    let cancel_for_signals = cancel.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        cancel_for_signals.cancel();
+    });
+    run(config, cancel).await
+}
+
 /// Block until the host process receives SIGINT or SIGTERM (Unix) or
 /// Ctrl-C / Ctrl-Break (Windows). Returns when the first such signal
 /// is observed.
