@@ -32,6 +32,7 @@ base64 = "0.22"
 blake2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 crypto_box = "0.9"
+directories = "5"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 rcgen = "0.13"
 rand = "0.8"
