@@ -10,6 +10,7 @@
 pub mod adapters;
 pub mod announce;
 pub mod config;
+pub mod daemon;
 pub mod identity;
 pub mod ipc;
 pub mod keystore;
@@ -17,5 +18,4 @@ pub mod observability;
 pub mod pair;
 pub mod proxy;
 pub mod registry;
-pub mod supervisor;
 pub mod update;
