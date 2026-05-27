@@ -19,7 +19,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::identity::tls_cert::GenerateError as CertGenerateError;
-use crate::identity::{Keypair, generate_self_signed_cert};
+use crate::identity::{Keystore, KeystoreError, generate_self_signed_cert};
 use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::endpoint::{PairEndpoint, ServeError};
 use crate::pair::invite_register::InviteRegister;
@@ -37,9 +37,14 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         "daemon starting"
     );
 
-    // Ephemeral identity for Phase 1 — keystore persistence is a follow-up.
-    let resolver = Arc::new(Keypair::generate());
-    info!(pubkey = %resolver.pubkey(), "generated ephemeral Resolver identity");
+    // Persistent identity in the OS keychain. First launch generates and
+    // saves; every subsequent launch loads the same keypair so already-
+    // paired phones keep working without re-pairing.
+    let keystore = Keystore::new()?;
+    let kp = keystore.load_or_generate_resolver_keypair()?;
+    let pubkey_str = kp.pubkey().to_string();
+    let resolver = Arc::new(kp);
+    info!(pubkey = %pubkey_str, "Resolver identity loaded");
 
     let cert = generate_self_signed_cert(config.bind_addr.ip())?;
 
@@ -107,6 +112,8 @@ pub async fn wait_for_shutdown_signal() {
 /// Failure modes for [`run`].
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    #[error("could not load Resolver identity from keychain: {0}")]
+    Keystore(#[from] KeystoreError),
     #[error("could not generate self-signed TLS certificate: {0}")]
     Cert(#[from] CertGenerateError),
     #[error("pair endpoint serve loop failed: {0}")]
@@ -124,6 +131,9 @@ mod tests {
     #[tokio::test]
     async fn run_boots_and_shuts_down_cleanly() {
         crate::observability::init();
+        // Critical: keep the daemon's Keystore::new() out of the real
+        // OS keychain. Process-global; idempotent.
+        crate::identity::keystore::install_mock_backend_for_tests();
 
         // Bind to ephemeral port so the test never races with a real one.
         let config = Config::defaults()

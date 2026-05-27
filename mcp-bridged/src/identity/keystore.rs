@@ -121,20 +121,26 @@ pub enum KeystoreError {
     WrongLength { got: usize },
 }
 
+/// Switch the global keyring backend to the in-memory mock. Idempotent.
+///
+/// Crate-internal: only test code should ever call this. Once installed
+/// the mock backend stays for the rest of the process, so production
+/// binaries must never run this.
+#[cfg(test)]
+pub(crate) fn install_mock_backend_for_tests() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Switch the global keyring backend to the in-memory mock. Each
-    /// test calls this once before doing keystore work. Mock storage is
-    /// process-global so tests must use distinct service names to avoid
-    /// cross-test interference.
     fn install_mock_backend() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-        });
+        install_mock_backend_for_tests();
     }
 
     #[test]
