@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -24,6 +25,7 @@ use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::endpoint::{PairEndpoint, ServeError};
 use crate::pair::invite_register::InviteRegister;
 use crate::pair::rustls_backend_verifier::RustlsBackendVerifier;
+use crate::registry::{Registry, RegistryError};
 
 /// Run the daemon until `cancel` is signalled.
 ///
@@ -48,6 +50,11 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
 
     let cert = generate_self_signed_cert(config.bind_addr.ip())?;
 
+    let registry_path = config.registry_path();
+    let registry = Registry::load_or_empty(&registry_path).await?;
+    info!(pin_count = registry.len(), path = ?registry_path, "registry loaded");
+    let registry = Arc::new(RwLock::new(registry));
+
     let invites = InviteRegister::spawn(cancel.clone());
 
     let verifier: Arc<dyn BackendVerifier> = Arc::new(RustlsBackendVerifier::new());
@@ -58,6 +65,8 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         resolver,
         invites,
         backend_verifier: verifier,
+        registry,
+        registry_path,
     };
     let bound = endpoint.bind()?;
     info!(listening = %bound.local_addr, "pair endpoint bound");
@@ -116,6 +125,8 @@ pub enum DaemonError {
     Keystore(#[from] KeystoreError),
     #[error("could not generate self-signed TLS certificate: {0}")]
     Cert(#[from] CertGenerateError),
+    #[error("could not load Server Registry: {0}")]
+    Registry(#[from] RegistryError),
     #[error("pair endpoint serve loop failed: {0}")]
     Serve(#[from] ServeError),
 }
@@ -135,10 +146,13 @@ mod tests {
         // OS keychain. Process-global; idempotent.
         crate::identity::keystore::install_mock_backend_for_tests();
 
-        // Bind to ephemeral port so the test never races with a real one.
+        // Bind to ephemeral port and an isolated data dir so the test
+        // never races with another and never touches the real registry.
+        let tmp = tempfile::tempdir().unwrap();
         let config = Config::defaults()
             .unwrap()
-            .with_bind_addr("127.0.0.1:0".parse().unwrap());
+            .with_bind_addr("127.0.0.1:0".parse().unwrap())
+            .with_data_dir(tmp.path());
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 

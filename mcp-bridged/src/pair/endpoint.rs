@@ -21,7 +21,9 @@
 //! later capture richer reasons in local logs only.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Once};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -30,12 +32,15 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum_server::tls_rustls::RustlsConfig;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 
 use crate::identity::{Keypair, SelfSignedCert};
 use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::invite_register::InviteRegister;
+use crate::registry::{Registry, ServerPin};
 
 /// Builder for the pair endpoint.
 #[allow(missing_debug_implementations)] // Arc<dyn BackendVerifier> is not Debug.
@@ -45,6 +50,11 @@ pub struct PairEndpoint {
     pub resolver: Arc<Keypair>,
     pub invites: InviteRegister,
     pub backend_verifier: Arc<dyn BackendVerifier>,
+    /// In-memory pin registry. Writes happen here on every successful
+    /// pair; reads from elsewhere (proxy hot path in a follow-up commit).
+    pub registry: Arc<RwLock<Registry>>,
+    /// Disk path where the registry persists after each accept.
+    pub registry_path: PathBuf,
 }
 
 /// Install the `ring` rustls crypto provider as the process default.
@@ -79,6 +89,8 @@ impl PairEndpoint {
             resolver: self.resolver,
             invites: self.invites,
             backend_verifier: self.backend_verifier,
+            registry: self.registry,
+            registry_path: self.registry_path,
         })
     }
 }
@@ -95,6 +107,8 @@ pub struct BoundEndpoint {
     resolver: Arc<Keypair>,
     invites: InviteRegister,
     backend_verifier: Arc<dyn BackendVerifier>,
+    registry: Arc<RwLock<Registry>>,
+    registry_path: PathBuf,
 }
 
 impl BoundEndpoint {
@@ -110,6 +124,8 @@ impl BoundEndpoint {
             resolver: self.resolver,
             invites: self.invites,
             backend_verifier: self.backend_verifier,
+            registry: self.registry,
+            registry_path: self.registry_path,
         });
 
         let app: Router = Router::new()
@@ -137,10 +153,12 @@ struct AppState {
     resolver: Arc<Keypair>,
     invites: InviteRegister,
     backend_verifier: Arc<dyn BackendVerifier>,
+    registry: Arc<RwLock<Registry>>,
+    registry_path: PathBuf,
 }
 
 async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
-    match accept_direction_b(
+    let Ok(payload) = accept_direction_b(
         &body,
         state.resolver.as_ref(),
         &state.invites,
@@ -148,9 +166,36 @@ async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusC
         state.local_addr,
     )
     .await
-    {
-        Ok(_) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::BAD_REQUEST,
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let pin = ServerPin::from_accepted_payload(&payload, created_at);
+    let lid = pin.logical_id.clone();
+
+    // Insert + persist under a single write lock so concurrent pair
+    // accepts can't interleave their saves.
+    let mut reg = state.registry.write().await;
+    reg.insert(pin);
+    let save_result = reg.save(&state.registry_path).await;
+    drop(reg);
+
+    match save_result {
+        Ok(()) => {
+            info!(logical_id = %lid, "pair accepted and persisted");
+            StatusCode::NO_CONTENT
+        }
+        Err(e) => {
+            // The pin is in memory but not on disk. The user thinks they
+            // succeeded but a restart loses the pairing. Surface 5xx so
+            // the client knows to retry.
+            error!(error = ?e, logical_id = %lid, "registry save failed after pair accept");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     }
 }
 

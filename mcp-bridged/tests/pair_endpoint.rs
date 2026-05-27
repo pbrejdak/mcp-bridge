@@ -6,6 +6,7 @@
 //! and asserts the response code.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,9 @@ use mcp_bridged::pair::logical_id::LogicalId;
 use mcp_bridged::pair::nonce::Nonce;
 use mcp_bridged::pair::payload::{BackendInfo, OriginInfo, PairPayload, Scope};
 use mcp_bridged::pair::seal;
+use mcp_bridged::registry::Registry;
+use tempfile::TempDir;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// Build a signed pair payload addressed to `resolver`, paired with the
@@ -74,13 +78,16 @@ fn seal_payload(payload: &PairPayload, receiver: &Ed25519Pubkey) -> Vec<u8> {
 }
 
 /// Start the endpoint on `127.0.0.1:0`, return its bound `SocketAddr`,
-/// the shared resolver/invites handles, and a cancel handle.
+/// the shared resolver/invites/registry handles, and a cancel handle.
 async fn start_endpoint(
     backend_verifier: Arc<dyn mcp_bridged::pair::backend_verifier::BackendVerifier>,
 ) -> (
     SocketAddr,
     Arc<Keypair>,
     InviteRegister,
+    Arc<RwLock<Registry>>,
+    PathBuf,
+    TempDir,
     CancellationToken,
     tokio::task::JoinHandle<()>,
 ) {
@@ -89,12 +96,18 @@ async fn start_endpoint(
     let cancel = CancellationToken::new();
     let invites = InviteRegister::spawn(cancel.clone());
 
+    let tmp = tempfile::tempdir().unwrap();
+    let registry_path = tmp.path().join("registry.json");
+    let registry = Arc::new(RwLock::new(Registry::new()));
+
     let endpoint = PairEndpoint {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         cert,
         resolver: resolver.clone(),
         invites: invites.clone(),
         backend_verifier,
+        registry: registry.clone(),
+        registry_path: registry_path.clone(),
     };
     let bound = endpoint.bind().expect("bind to 127.0.0.1:0");
     let local_addr = bound.local_addr;
@@ -107,7 +120,16 @@ async fn start_endpoint(
     // Give the listener a tick to start accepting before the client connects.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    (local_addr, resolver, invites, cancel, task)
+    (
+        local_addr,
+        resolver,
+        invites,
+        registry,
+        registry_path,
+        tmp,
+        cancel,
+        task,
+    )
 }
 
 fn lan_addr_for(local: SocketAddr) -> String {
@@ -124,8 +146,8 @@ fn https_client() -> reqwest::Client {
 }
 
 #[tokio::test]
-async fn happy_path_returns_204() {
-    let (local_addr, resolver, invites, cancel, task) =
+async fn happy_path_returns_204_and_persists_pin() {
+    let (local_addr, resolver, invites, registry, registry_path, _tmp, cancel, task) =
         start_endpoint(Arc::new(AlwaysAccept)).await;
 
     let lan_addr = lan_addr_for(local_addr);
@@ -138,13 +160,27 @@ async fn happy_path_returns_204() {
     let resp = client.post(&url).body(sealed).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
 
+    // In-memory registry has the pin.
+    {
+        let reg = registry.read().await;
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get(&payload.origin.logical_id).is_some());
+    }
+
+    // On-disk registry has the pin.
+    assert!(registry_path.exists(), "registry.json must be on disk");
+    let on_disk = mcp_bridged::registry::Registry::load_or_empty(&registry_path)
+        .await
+        .unwrap();
+    assert_eq!(on_disk.len(), 1);
+
     cancel.cancel();
     let _ = task.await;
 }
 
 #[tokio::test]
 async fn unknown_nonce_returns_400() {
-    let (local_addr, resolver, _invites, cancel, task) =
+    let (local_addr, resolver, _invites, _registry, _registry_path, _tmp, cancel, task) =
         start_endpoint(Arc::new(AlwaysAccept)).await;
 
     let lan_addr = lan_addr_for(local_addr);
@@ -164,7 +200,7 @@ async fn unknown_nonce_returns_400() {
 
 #[tokio::test]
 async fn backend_fingerprint_mismatch_returns_400() {
-    let (local_addr, resolver, invites, cancel, task) =
+    let (local_addr, resolver, invites, _registry, _registry_path, _tmp, cancel, task) =
         start_endpoint(Arc::new(AlwaysFingerprintMismatch)).await;
 
     let lan_addr = lan_addr_for(local_addr);
@@ -183,7 +219,7 @@ async fn backend_fingerprint_mismatch_returns_400() {
 
 #[tokio::test]
 async fn garbage_body_returns_400() {
-    let (local_addr, _resolver, _invites, cancel, task) =
+    let (local_addr, _resolver, _invites, _registry, _registry_path, _tmp, cancel, task) =
         start_endpoint(Arc::new(AlwaysAccept)).await;
 
     let client = https_client();
