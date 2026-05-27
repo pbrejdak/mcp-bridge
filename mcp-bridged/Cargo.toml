@@ -34,6 +34,7 @@ clap = { version = "4", features = ["derive", "env"] }
 crypto_box = "0.9"
 directories = "5"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "crypto-rust"] }
 rcgen = "0.13"
 rand = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

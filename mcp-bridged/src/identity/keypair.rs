@@ -62,6 +62,15 @@ impl Keypair {
     pub(crate) fn x25519_secret_bytes(&self) -> [u8; 32] {
         self.signing.to_scalar_bytes()
     }
+
+    /// Borrow the 32-byte Ed25519 seed for persistence to the OS keychain.
+    ///
+    /// Returned inside [`zeroize::Zeroizing`] so the bytes are wiped when
+    /// the caller drops them. Crate-internal: only the keystore writes
+    /// this to disk; nothing else should ever see the raw seed.
+    pub(crate) fn to_seed_bytes(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.signing.to_bytes())
+    }
 }
 
 impl fmt::Debug for Keypair {
