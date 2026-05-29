@@ -1,20 +1,35 @@
-//! OS keychain-backed persistence for the Resolver's Ed25519 keypair.
+//! OS keychain-backed persistence for the Resolver's secret material.
 //!
 //! Per [`docs/DAEMON.md`](../../../../docs/DAEMON.md) §7.2 and
-//! [`mcp-bridged/CLAUDE.md`](../../../CLAUDE.md) §6: keypair lives in
+//! [`mcp-bridged/CLAUDE.md`](../../../CLAUDE.md) §6: secrets live in
 //! the OS keychain via the [`keyring`] crate (macOS Security framework,
 //! Windows credential vault, Linux Secret Service).
 //!
-//! Storage shape: a single keychain entry under
-//! `(service="dev.mcpbridge.mcp-bridged", account="resolver-keypair-v1")`
-//! whose value is the base64url-no-pad encoding of the 32-byte Ed25519
-//! seed. Versioning the account name lets us migrate without touching
-//! the previous entry if a future release changes the encoding.
+//! Today the keystore manages three kinds of entries:
+//!
+//! - **Resolver keypair** — one entry, account `resolver-keypair-v1`,
+//!   value = base64url(32-byte Ed25519 seed).
+//! - **Per-Pin bearer token** — one entry per LID, account
+//!   `bearer/<lid>`, value = raw bearer-token string.
+//! - **Per-Pin loopback key** — one entry per LID, account
+//!   `loopback/<lid>`, value = base64url(32-byte random key).
+//!
+//! `Entry` instances are cached on first access by account name so that
+//! the in-memory `keyring::mock` backend used in tests round-trips
+//! correctly (it stores secrets per-`Entry`, not per-(service, account)).
+//! Production backends ignore the cache distinction.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keyring::Entry;
 use thiserror::Error;
+
+use crate::pair::bearer_token::{BearerToken, BearerTokenError};
+use crate::pair::logical_id::LogicalId;
+use crate::pair::loopback_key::LoopbackKey;
 
 use super::keypair::Keypair;
 
@@ -22,20 +37,29 @@ use super::keypair::Keypair;
 /// used in [`crate::config`].
 pub const KEYCHAIN_SERVICE: &str = "dev.mcpbridge.mcp-bridged";
 
-/// Keychain account name for the Resolver keypair. Bumping the `v1`
-/// suffix lets us migrate to a new encoding without colliding with the
-/// old entry.
+/// Account name for the Resolver keypair. Bumping the `v1` suffix lets
+/// future encoding migrations land beside the old entry.
 pub const RESOLVER_KEYPAIR_ACCOUNT: &str = "resolver-keypair-v1";
+
+fn bearer_account_for(lid: &LogicalId) -> String {
+    format!("bearer/{}", lid.as_str())
+}
+
+fn loopback_account_for(lid: &LogicalId) -> String {
+    format!("loopback/{}", lid.as_str())
+}
 
 /// Handle to the OS keychain, scoped to one logical service.
 ///
-/// Holds the underlying `keyring::Entry` directly so that save / load /
-/// delete operations all reference the same backend object — this is
-/// also necessary for the `keyring::mock` backend used in tests, which
-/// stores secrets per-`Entry` rather than per-(service, account).
-#[derive(Debug)]
+/// Holds an internal cache of `keyring::Entry` instances by account
+/// name. Entries are created lazily on first use and kept for the
+/// lifetime of the keystore — required because the
+/// [`keyring::mock`] backend stores secrets per-`Entry`, not per
+/// (service, account).
+#[allow(missing_debug_implementations)] // keyring::Entry is not Debug.
 pub struct Keystore {
-    resolver_keypair_entry: Entry,
+    service: String,
+    entries: Mutex<HashMap<String, Entry>>,
 }
 
 impl Keystore {
@@ -45,45 +69,61 @@ impl Keystore {
     }
 
     /// Construct a keystore scoped to a custom service name. Used by
-    /// tests so parallel runs don't collide, and by future multi-tenant
-    /// daemon flavours.
+    /// tests so parallel runs don't collide.
     pub fn for_service(service: &str) -> Result<Self, KeystoreError> {
-        let entry =
-            Entry::new(service, RESOLVER_KEYPAIR_ACCOUNT).map_err(KeystoreError::Backend)?;
         Ok(Self {
-            resolver_keypair_entry: entry,
+            service: service.to_owned(),
+            entries: Mutex::new(HashMap::new()),
         })
     }
 
+    /// Obtain (or lazily create + cache) the `keyring::Entry` for one
+    /// account name.
+    fn with_entry<R, F>(&self, account: &str, f: F) -> Result<R, KeystoreError>
+    where
+        F: FnOnce(&Entry) -> Result<R, KeystoreError>,
+    {
+        let mut map = self
+            .entries
+            .lock()
+            .expect("keystore entries mutex is uncontended and never poisoned");
+        if !map.contains_key(account) {
+            let entry = Entry::new(&self.service, account).map_err(KeystoreError::Backend)?;
+            map.insert(account.to_owned(), entry);
+        }
+        let entry = map.get(account).expect("just inserted above");
+        f(entry)
+    }
+
+    // ------------------------------------------------------------------
+    // Resolver keypair
+    // ------------------------------------------------------------------
+
     /// Load the Resolver keypair if one is stored, `Ok(None)` otherwise.
     pub fn load_resolver_keypair(&self) -> Result<Option<Keypair>, KeystoreError> {
-        match self.resolver_keypair_entry.get_password() {
-            Ok(encoded) => Ok(Some(Keypair::from_seed(decode_seed(&encoded)?))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(KeystoreError::Backend(e)),
-        }
+        self.with_entry(RESOLVER_KEYPAIR_ACCOUNT, |entry| {
+            match entry.get_password() {
+                Ok(encoded) => Ok(Some(Keypair::from_seed(decode_32_bytes(&encoded)?))),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(KeystoreError::Backend(e)),
+            }
+        })
     }
 
     /// Save the Resolver keypair, overwriting any existing entry.
     pub fn save_resolver_keypair(&self, kp: &Keypair) -> Result<(), KeystoreError> {
-        let seed = kp.to_seed_bytes();
-        let encoded = encode_seed(&seed);
-        self.resolver_keypair_entry
-            .set_password(&encoded)
-            .map_err(KeystoreError::Backend)?;
-        Ok(())
+        let encoded = URL_SAFE_NO_PAD.encode(kp.to_seed_bytes().as_slice());
+        self.with_entry(RESOLVER_KEYPAIR_ACCOUNT, |entry| {
+            entry.set_password(&encoded).map_err(KeystoreError::Backend)
+        })
     }
 
-    /// Delete the Resolver keypair from the keychain. No-op if absent.
+    /// Delete the Resolver keypair. No-op if absent.
     pub fn delete_resolver_keypair(&self) -> Result<(), KeystoreError> {
-        match self.resolver_keypair_entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(KeystoreError::Backend(e)),
-        }
+        self.with_entry(RESOLVER_KEYPAIR_ACCOUNT, delete_if_present)
     }
 
-    /// Load the Resolver keypair, generating + saving a fresh one if no
-    /// entry exists. The "first launch" idiom for the daemon.
+    /// Load-or-generate idiom for daemon first launch.
     pub fn load_or_generate_resolver_keypair(&self) -> Result<Keypair, KeystoreError> {
         if let Some(kp) = self.load_resolver_keypair()? {
             return Ok(kp);
@@ -92,15 +132,83 @@ impl Keystore {
         self.save_resolver_keypair(&kp)?;
         Ok(kp)
     }
+
+    // ------------------------------------------------------------------
+    // Per-Pin bearer token
+    // ------------------------------------------------------------------
+
+    /// Save (or overwrite) the bearer token for `lid`.
+    pub fn save_bearer_token(
+        &self,
+        lid: &LogicalId,
+        token: &BearerToken,
+    ) -> Result<(), KeystoreError> {
+        let account = bearer_account_for(lid);
+        self.with_entry(&account, |entry| {
+            entry
+                .set_password(token.expose())
+                .map_err(KeystoreError::Backend)
+        })
+    }
+
+    /// Load the bearer token for `lid`, or `Ok(None)` if absent.
+    pub fn load_bearer_token(&self, lid: &LogicalId) -> Result<Option<BearerToken>, KeystoreError> {
+        let account = bearer_account_for(lid);
+        self.with_entry(&account, |entry| match entry.get_password() {
+            Ok(value) => Ok(Some(BearerToken::new(value)?)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(KeystoreError::Backend(e)),
+        })
+    }
+
+    /// Delete the bearer token for `lid`. No-op if absent.
+    pub fn delete_bearer_token(&self, lid: &LogicalId) -> Result<(), KeystoreError> {
+        let account = bearer_account_for(lid);
+        self.with_entry(&account, delete_if_present)
+    }
+
+    // ------------------------------------------------------------------
+    // Per-Pin loopback key
+    // ------------------------------------------------------------------
+
+    /// Save (or overwrite) the loopback key for `lid`.
+    pub fn save_loopback_key(
+        &self,
+        lid: &LogicalId,
+        key: &LoopbackKey,
+    ) -> Result<(), KeystoreError> {
+        let account = loopback_account_for(lid);
+        let encoded = URL_SAFE_NO_PAD.encode(key.as_bytes());
+        self.with_entry(&account, |entry| {
+            entry.set_password(&encoded).map_err(KeystoreError::Backend)
+        })
+    }
+
+    /// Load the loopback key for `lid`, or `Ok(None)` if absent.
+    pub fn load_loopback_key(&self, lid: &LogicalId) -> Result<Option<LoopbackKey>, KeystoreError> {
+        let account = loopback_account_for(lid);
+        self.with_entry(&account, |entry| match entry.get_password() {
+            Ok(encoded) => Ok(Some(LoopbackKey::from_bytes(decode_32_bytes(&encoded)?))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(KeystoreError::Backend(e)),
+        })
+    }
+
+    /// Delete the loopback key for `lid`. No-op if absent.
+    pub fn delete_loopback_key(&self, lid: &LogicalId) -> Result<(), KeystoreError> {
+        let account = loopback_account_for(lid);
+        self.with_entry(&account, delete_if_present)
+    }
 }
 
-/// Base64url-encode a 32-byte Ed25519 seed for keychain storage.
-fn encode_seed(seed: &[u8; 32]) -> String {
-    URL_SAFE_NO_PAD.encode(seed)
+fn delete_if_present(entry: &Entry) -> Result<(), KeystoreError> {
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(KeystoreError::Backend(e)),
+    }
 }
 
-/// Decode a base64url-encoded seed back into the 32-byte form.
-fn decode_seed(encoded: &str) -> Result<[u8; 32], KeystoreError> {
+fn decode_32_bytes(encoded: &str) -> Result<[u8; 32], KeystoreError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(KeystoreError::Base64)?;
@@ -117,15 +225,15 @@ pub enum KeystoreError {
     Backend(#[from] keyring::Error),
     #[error("stored value is not valid base64url: {0}")]
     Base64(#[from] base64::DecodeError),
-    #[error("stored seed is {got} bytes; expected 32")]
+    #[error("stored value is {got} bytes; expected 32")]
     WrongLength { got: usize },
+    #[error("stored bearer token failed validation: {0}")]
+    BearerToken(#[from] BearerTokenError),
 }
 
 /// Switch the global keyring backend to the in-memory mock. Idempotent.
 ///
-/// Crate-internal: only test code should ever call this. Once installed
-/// the mock backend stays for the rest of the process, so production
-/// binaries must never run this.
+/// Crate-internal: only test code should ever call this.
 #[cfg(test)]
 pub(crate) fn install_mock_backend_for_tests() {
     use std::sync::Once;
@@ -143,70 +251,118 @@ mod tests {
         install_mock_backend_for_tests();
     }
 
-    #[test]
-    fn encode_decode_round_trips() {
-        let seed = [0xABu8; 32];
-        let encoded = encode_seed(&seed);
-        let back = decode_seed(&encoded).unwrap();
-        assert_eq!(back, seed);
+    fn sample_lid(s: &str) -> LogicalId {
+        LogicalId::new(s).unwrap()
     }
 
-    #[test]
-    fn decode_rejects_wrong_length() {
-        let encoded = URL_SAFE_NO_PAD.encode([0u8; 31]);
-        assert!(matches!(
-            decode_seed(&encoded),
-            Err(KeystoreError::WrongLength { got: 31 })
-        ));
-    }
+    // -- Resolver keypair -------------------------------------------
 
     #[test]
-    fn decode_rejects_invalid_base64() {
-        assert!(matches!(
-            decode_seed("!!!not-base64!!!"),
-            Err(KeystoreError::Base64(_))
-        ));
-    }
-
-    #[test]
-    fn load_on_empty_returns_none() {
+    fn resolver_load_on_empty_returns_none() {
         install_mock_backend();
-        let ks = Keystore::for_service("test-load-on-empty").unwrap();
+        let ks = Keystore::for_service("test-resolver-empty").unwrap();
         ks.delete_resolver_keypair().unwrap();
         assert!(ks.load_resolver_keypair().unwrap().is_none());
     }
 
     #[test]
-    fn save_then_load_round_trips() {
+    fn resolver_save_then_load_round_trips() {
         install_mock_backend();
-        let ks = Keystore::for_service("test-save-load").unwrap();
+        let ks = Keystore::for_service("test-resolver-save-load").unwrap();
         ks.delete_resolver_keypair().unwrap();
         let kp = Keypair::generate();
-        let expected_pub = *kp.pubkey();
+        let pubkey = *kp.pubkey();
         ks.save_resolver_keypair(&kp).unwrap();
-        let loaded = ks.load_resolver_keypair().unwrap().expect("entry present");
-        assert_eq!(loaded.pubkey(), &expected_pub);
+        let loaded = ks.load_resolver_keypair().unwrap().unwrap();
+        assert_eq!(loaded.pubkey(), &pubkey);
     }
 
     #[test]
-    fn load_or_generate_creates_on_first_call() {
+    fn resolver_load_or_generate_is_stable() {
         install_mock_backend();
-        let ks = Keystore::for_service("test-load-or-generate-first").unwrap();
+        let ks = Keystore::for_service("test-resolver-stable").unwrap();
         ks.delete_resolver_keypair().unwrap();
         let a = ks.load_or_generate_resolver_keypair().unwrap();
         let b = ks.load_or_generate_resolver_keypair().unwrap();
-        assert_eq!(
-            a.pubkey(),
-            b.pubkey(),
-            "second call must return the same key"
-        );
+        assert_eq!(a.pubkey(), b.pubkey());
+    }
+
+    // -- Bearer tokens ----------------------------------------------
+
+    #[test]
+    fn bearer_save_then_load_round_trips() {
+        install_mock_backend();
+        let ks = Keystore::for_service("test-bearer-save-load").unwrap();
+        let lid = sample_lid("bodylog-7f3a");
+        let token = BearerToken::new("abc123").unwrap();
+        ks.save_bearer_token(&lid, &token).unwrap();
+        let loaded = ks.load_bearer_token(&lid).unwrap().unwrap();
+        assert_eq!(loaded.expose(), "abc123");
     }
 
     #[test]
-    fn delete_is_idempotent() {
+    fn bearer_load_on_unknown_lid_returns_none() {
         install_mock_backend();
-        let ks = Keystore::for_service("test-delete-idempotent").unwrap();
-        ks.delete_resolver_keypair().unwrap();
-        ks.delete_resolver_keypair().unwrap(); // second time must also Ok
+        let ks = Keystore::for_service("test-bearer-unknown").unwrap();
+        let lid = sample_lid("not-there");
+        assert!(ks.load_bearer_token(&lid).unwrap().is_none());
+    }
+
+    #[test]
+    fn bearer_delete_is_idempotent() {
+        install_mock_backend();
+        let ks = Keystore::for_service("test-bearer-delete-idempotent").unwrap();
+        let lid = sample_lid("foo");
+        ks.delete_bearer_token(&lid).unwrap();
+        ks.delete_bearer_token(&lid).unwrap();
+    }
+
+    // -- Loopback keys ----------------------------------------------
+
+    #[test]
+    fn loopback_save_then_load_round_trips() {
+        install_mock_backend();
+        let ks = Keystore::for_service("test-loopback-save-load").unwrap();
+        let lid = sample_lid("alpha");
+        let key = LoopbackKey::from_bytes([0xAB; 32]);
+        ks.save_loopback_key(&lid, &key).unwrap();
+        let loaded = ks.load_loopback_key(&lid).unwrap().unwrap();
+        assert_eq!(loaded, key);
+    }
+
+    #[test]
+    fn loopback_load_on_unknown_lid_returns_none() {
+        install_mock_backend();
+        let ks = Keystore::for_service("test-loopback-unknown").unwrap();
+        let lid = sample_lid("unknown-lid");
+        assert!(ks.load_loopback_key(&lid).unwrap().is_none());
+    }
+
+    // -- Multiple entries co-exist ----------------------------------
+
+    #[test]
+    fn resolver_bearer_and_loopback_coexist() {
+        install_mock_backend();
+        let ks = Keystore::for_service("test-coexist").unwrap();
+        let lid = sample_lid("bodylog");
+
+        let kp = Keypair::generate();
+        let pubkey = *kp.pubkey();
+        let bearer = BearerToken::new("token-xyz").unwrap();
+        let lbk = LoopbackKey::from_bytes([0xCD; 32]);
+
+        ks.save_resolver_keypair(&kp).unwrap();
+        ks.save_bearer_token(&lid, &bearer).unwrap();
+        ks.save_loopback_key(&lid, &lbk).unwrap();
+
+        assert_eq!(
+            ks.load_resolver_keypair().unwrap().unwrap().pubkey(),
+            &pubkey
+        );
+        assert_eq!(
+            ks.load_bearer_token(&lid).unwrap().unwrap().expose(),
+            "token-xyz"
+        );
+        assert_eq!(ks.load_loopback_key(&lid).unwrap().unwrap(), lbk);
     }
 }

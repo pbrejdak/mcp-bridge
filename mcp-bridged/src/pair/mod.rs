@@ -19,6 +19,7 @@ pub mod invite_register;
 pub mod lan_addr;
 pub mod local_dest;
 pub mod logical_id;
+pub mod loopback_key;
 pub mod nonce;
 pub mod payload;
 pub mod rustls_backend_verifier;

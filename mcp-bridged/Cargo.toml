@@ -31,6 +31,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
 blake2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
+constant_time_eq = "0.3"
 crypto_box = "0.9"
 directories = "5"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
