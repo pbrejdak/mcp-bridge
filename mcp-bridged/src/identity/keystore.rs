@@ -233,9 +233,12 @@ pub enum KeystoreError {
 
 /// Switch the global keyring backend to the in-memory mock. Idempotent.
 ///
-/// Crate-internal: only test code should ever call this.
-#[cfg(test)]
-pub(crate) fn install_mock_backend_for_tests() {
+/// **Test-only.** Calling this in production code permanently disables
+/// access to the OS keychain for the rest of the process. The function
+/// is `pub` rather than `pub(crate)` because the integration tests
+/// under `mcp-bridged/tests/` need to call it before constructing a
+/// `Keystore`; CI lints check that no non-test target invokes it.
+pub fn install_mock_backend() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -246,10 +249,6 @@ pub(crate) fn install_mock_backend_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn install_mock_backend() {
-        install_mock_backend_for_tests();
-    }
 
     fn sample_lid(s: &str) -> LogicalId {
         LogicalId::new(s).unwrap()

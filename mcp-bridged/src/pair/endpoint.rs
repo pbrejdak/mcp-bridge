@@ -36,10 +36,11 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::identity::{Keypair, SelfSignedCert};
+use crate::identity::{Keypair, Keystore, SelfSignedCert};
 use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::invite_register::InviteRegister;
+use crate::pair::loopback_key::LoopbackKey;
 use crate::registry::{Registry, ServerPin};
 
 /// Builder for the pair endpoint.
@@ -55,6 +56,9 @@ pub struct PairEndpoint {
     pub registry: Arc<RwLock<Registry>>,
     /// Disk path where the registry persists after each accept.
     pub registry_path: PathBuf,
+    /// OS keychain handle. The handler writes the per-Pin bearer token
+    /// and loopback key here after each successful accept.
+    pub keystore: Arc<Keystore>,
 }
 
 /// Install the `ring` rustls crypto provider as the process default.
@@ -91,6 +95,7 @@ impl PairEndpoint {
             backend_verifier: self.backend_verifier,
             registry: self.registry,
             registry_path: self.registry_path,
+            keystore: self.keystore,
         })
     }
 }
@@ -109,6 +114,7 @@ pub struct BoundEndpoint {
     backend_verifier: Arc<dyn BackendVerifier>,
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
+    keystore: Arc<Keystore>,
 }
 
 impl BoundEndpoint {
@@ -126,6 +132,7 @@ impl BoundEndpoint {
             backend_verifier: self.backend_verifier,
             registry: self.registry,
             registry_path: self.registry_path,
+            keystore: self.keystore,
         });
 
         let app: Router = Router::new()
@@ -155,6 +162,7 @@ struct AppState {
     backend_verifier: Arc<dyn BackendVerifier>,
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
+    keystore: Arc<Keystore>,
 }
 
 async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
@@ -176,6 +184,22 @@ async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusC
         .unwrap_or(0);
     let pin = ServerPin::from_accepted_payload(&payload, created_at);
     let lid = pin.logical_id.clone();
+
+    // Persist the per-Pin secrets to the keychain BEFORE writing the
+    // registry. The registry references these secrets indirectly (by
+    // LID); if the keychain write fails the registry entry would point
+    // at material that does not exist.
+    let loopback_key = LoopbackKey::random();
+    if let Err(e) = state.keystore.save_loopback_key(&lid, &loopback_key) {
+        error!(error = ?e, logical_id = %lid, "keystore loopback-key save failed");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    if let Some(token) = payload.auth.value.as_ref() {
+        if let Err(e) = state.keystore.save_bearer_token(&lid, token) {
+            error!(error = ?e, logical_id = %lid, "keystore bearer-token save failed");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
 
     // Insert + persist under a single write lock so concurrent pair
     // accepts can't interleave their saves.

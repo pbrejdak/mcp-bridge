@@ -44,7 +44,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
     // Persistent identity in the OS keychain. First launch generates and
     // saves; every subsequent launch loads the same keypair so already-
     // paired phones keep working without re-pairing.
-    let keystore = Keystore::new()?;
+    let keystore = Arc::new(Keystore::new()?);
     let kp = keystore.load_or_generate_resolver_keypair()?;
     let pubkey_str = kp.pubkey().to_string();
     let resolver = Arc::new(kp);
@@ -69,6 +69,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         backend_verifier: verifier,
         registry: registry.clone(),
         registry_path,
+        keystore: keystore.clone(),
     };
     let bound = endpoint.bind()?;
     info!(listening = %bound.local_addr, "pair endpoint bound");
@@ -160,7 +161,7 @@ mod tests {
         crate::observability::init();
         // Critical: keep the daemon's Keystore::new() out of the real
         // OS keychain. Process-global; idempotent.
-        crate::identity::keystore::install_mock_backend_for_tests();
+        crate::identity::keystore::install_mock_backend();
 
         // Bind to ephemeral port and an isolated data dir so the test
         // never races with another and never touches the real registry.
