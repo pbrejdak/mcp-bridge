@@ -38,6 +38,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "crypto-rust"] }
 rcgen = "0.13"
 rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 secrecy = "0.10"
