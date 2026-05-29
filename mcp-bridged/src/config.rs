@@ -57,6 +57,13 @@ impl Config {
         self.data_dir.join("registry.json")
     }
 
+    /// Path to the IPC control socket. UDS on Unix; Windows named-pipe
+    /// support lands in a later commit.
+    #[must_use]
+    pub fn ipc_socket_path(&self) -> PathBuf {
+        self.data_dir.join("control.sock")
+    }
+
     /// Override the bind address (used by CLI `--bind` flag).
     #[must_use]
     pub fn with_bind_addr(mut self, addr: SocketAddr) -> Self {

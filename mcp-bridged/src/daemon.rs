@@ -12,15 +12,17 @@
 //! has more than its current two services to manage.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::config::Config;
 use crate::identity::tls_cert::GenerateError as CertGenerateError;
 use crate::identity::{Keystore, KeystoreError, generate_self_signed_cert};
+use crate::ipc;
 use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::endpoint::{PairEndpoint, ServeError};
 use crate::pair::invite_register::InviteRegister;
@@ -65,16 +67,30 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         resolver,
         invites,
         backend_verifier: verifier,
-        registry,
+        registry: registry.clone(),
         registry_path,
     };
     let bound = endpoint.bind()?;
     info!(listening = %bound.local_addr, "pair endpoint bound");
 
-    bound.serve(cancel).await?;
+    let ipc_ctx = ipc::Context {
+        start: Instant::now(),
+        registry,
+        pair_endpoint_addr: bound.local_addr,
+    };
+    let ipc_socket_path = config.ipc_socket_path();
+    let ipc_cancel = cancel.clone();
+    let ipc_task = tokio::spawn(async move {
+        if let Err(e) = ipc::serve(ipc_socket_path, ipc_ctx, ipc_cancel).await {
+            error!(error = ?e, "IPC server exited with error");
+        }
+    });
+
+    let serve_result = bound.serve(cancel).await;
+    let _ = ipc_task.await;
 
     info!("daemon shut down");
-    Ok(())
+    serve_result.map_err(DaemonError::Serve)
 }
 
 /// Run the daemon and wire its shutdown to the host process's SIGINT /
