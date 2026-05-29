@@ -8,9 +8,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use mcp_bridged::{config::Config, daemon, observability};
+use mcp_bridged::{config::Config, daemon, ipc, observability};
 
 #[derive(Parser, Debug)]
 #[command(name = "mcp-bridge", version, about = "MCP Bridge daemon CLI", long_about = None)]
@@ -83,14 +83,15 @@ enum IdentityCommand {
 async fn main() -> Result<()> {
     observability::init();
     let cli = Cli::parse();
+    let json_output = cli.json;
 
     match cli.command {
         Command::Daemon(args) => run_daemon(args).await,
+        Command::Status => run_status(json_output).await,
         Command::Pair { .. } => not_implemented("pair"),
         Command::List => not_implemented("list"),
         Command::Show { .. } => not_implemented("show"),
         Command::Revoke { .. } => not_implemented("revoke"),
-        Command::Status => not_implemented("status"),
         Command::Logs { .. } => not_implemented("logs"),
         Command::Diagnostics => not_implemented("diagnostics"),
         Command::Update => not_implemented("update"),
@@ -117,6 +118,58 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
         .await
         .context("daemon run loop")?;
     Ok(())
+}
+
+async fn run_status(json_output: bool) -> Result<()> {
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    #[cfg(not(unix))]
+    {
+        let _ = (json_output, socket);
+        bail!("`mcp-bridge status` is not yet implemented on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        if !socket.exists() {
+            bail!(
+                "daemon does not appear to be running ({} is missing). \
+                 Start it with `mcp-bridge daemon`.",
+                socket.display()
+            );
+        }
+
+        let request = ipc::JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: serde_json::json!("status-1"),
+            method: ipc::method_names::DAEMON_STATUS.to_owned(),
+            params: None,
+        };
+        let response = ipc::call_unix(&socket, &request)
+            .await
+            .map_err(|e| anyhow!("could not reach daemon over IPC: {e}"))?;
+
+        if let Some(err) = response.error {
+            bail!("daemon returned error {}: {}", err.code, err.message);
+        }
+        let result = response
+            .result
+            .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
+
+        let status: ipc::DaemonStatus =
+            serde_json::from_value(result).context("decoding daemon.status response")?;
+        println!("mcp-bridged v{}", status.version);
+        println!("uptime         {}s", status.uptime_seconds);
+        println!("pair endpoint  {}", status.pair_endpoint);
+        println!("pin count      {}", status.pin_count);
+        Ok(())
+    }
 }
 
 fn not_implemented(subcommand: &str) -> Result<()> {

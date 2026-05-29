@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::registry::Registry;
@@ -46,7 +46,7 @@ pub struct Context {
 }
 
 /// Result body of [`method_names::DAEMON_STATUS`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub version: String,
     pub uptime_seconds: u64,
