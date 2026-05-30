@@ -9,11 +9,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use axum_server::tls_rustls::RustlsConfig;
 use mcp_bridged::identity::keystore::install_mock_backend;
 use mcp_bridged::identity::{Keystore, SelfSignedCert, generate_self_signed_cert};
@@ -74,6 +76,28 @@ async fn echo(
     )
 }
 
+/// SSE handler: emits three `data: N` events spaced apart so a buffered
+/// proxy would visibly delay the first chunk vs. a streaming one.
+async fn sse() -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    tokio::spawn(async move {
+        for n in 1..=3 {
+            let line = format!("data: {n}\n\n");
+            if tx.send(Ok(Bytes::from(line))).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
 async fn start_https_backend(
     cert: &SelfSignedCert,
     expected_bearer: &str,
@@ -85,6 +109,7 @@ async fn start_https_backend(
         expected_bearer: format!("Bearer {expected_bearer}"),
     });
     let app: Router = Router::new()
+        .route("/sse", any(sse))
         .route("/", any(echo))
         .route("/{*rest}", any(echo))
         .with_state(state);
@@ -298,6 +323,55 @@ async fn unknown_lid_returns_404() {
     let client = reqwest::Client::builder().build().unwrap();
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn sse_response_streams_chunk_by_chunk() {
+    // Proves the listener doesn't buffer the response body. The
+    // backend emits three SSE events 120ms apart and the test asserts
+    // the first one arrives at the client well before the third is
+    // even sent — impossible if the proxy were holding the whole body.
+    let h = LoopbackHarness::start().await;
+    let url = h.loopback_url("/sse");
+
+    let client = reqwest::Client::builder().build().unwrap();
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .contains("text/event-stream"),
+    );
+
+    let started = tokio::time::Instant::now();
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("stream chunk");
+        chunks.push(String::from_utf8(chunk.to_vec()).unwrap());
+        // Bail as soon as we've collected the first event — a buffering
+        // proxy would never reach this line before the backend has sent
+        // every chunk.
+        if chunks.iter().any(|s| s.contains("data: 1")) {
+            break;
+        }
+    }
+    let first_chunk_elapsed = started.elapsed();
+    assert!(
+        chunks.iter().any(|s| s.contains("data: 1")),
+        "first SSE event must arrive before stream ends; got {chunks:?}",
+    );
+    // The backend sleeps 120ms BETWEEN events; the third event lands at
+    // T ≈ 360ms. If the listener buffered, we'd see no chunks before T.
+    // Give a generous wall-clock budget to absorb scheduler / TLS jitter.
+    assert!(
+        first_chunk_elapsed < Duration::from_millis(300),
+        "first chunk took {first_chunk_elapsed:?}, expected streaming behaviour",
+    );
 
     h.shutdown().await;
 }
