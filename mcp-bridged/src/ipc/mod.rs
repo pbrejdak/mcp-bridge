@@ -12,7 +12,7 @@ pub mod methods;
 pub mod server;
 pub mod wire;
 
-pub use methods::{Context, DaemonStatus, dispatch, method_names};
+pub use methods::{Context, DaemonStatus, ServerListEntry, dispatch, method_names};
 #[cfg(unix)]
 pub use server::call_unix;
 pub use server::{IpcError, serve};
