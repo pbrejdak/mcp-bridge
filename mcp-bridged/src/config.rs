@@ -26,11 +26,19 @@ const APPLICATION: &str = "mcp-bridged";
 /// will grow LAN-interface auto-detection in a later commit.
 pub const DEFAULT_BIND_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 8765);
 
+/// Default loopback-listener bind address per SPEC §6.1
+/// recommendation (8765 is the pair endpoint default; loopback gets the
+/// next port up).
+pub const DEFAULT_LOOPBACK_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 8766);
+
 /// Runtime configuration handed to the daemon entry point.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Where the HTTPS pair endpoint binds.
     pub bind_addr: SocketAddr,
+    /// Where the loopback listener binds. MUST be 127.0.0.1 (or ::1);
+    /// the listener refuses to start on a non-loopback address.
+    pub loopback_addr: SocketAddr,
     /// OS-appropriate data directory for persistent state (registry, …).
     pub data_dir: PathBuf,
 }
@@ -44,8 +52,10 @@ impl Config {
         let dirs = ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
             .ok_or(ConfigError::NoProjectDirs)?;
         let (octets, port) = DEFAULT_BIND_ADDR;
+        let (lb_octets, lb_port) = DEFAULT_LOOPBACK_ADDR;
         Ok(Self {
             bind_addr: SocketAddr::from((octets, port)),
+            loopback_addr: SocketAddr::from((lb_octets, lb_port)),
             data_dir: dirs.data_dir().to_path_buf(),
         })
     }
@@ -68,6 +78,14 @@ impl Config {
     #[must_use]
     pub fn with_bind_addr(mut self, addr: SocketAddr) -> Self {
         self.bind_addr = addr;
+        self
+    }
+
+    /// Override the loopback listener address (used by CLI flags and
+    /// tests that need an ephemeral port).
+    #[must_use]
+    pub fn with_loopback_addr(mut self, addr: SocketAddr) -> Self {
+        self.loopback_addr = addr;
         self
     }
 

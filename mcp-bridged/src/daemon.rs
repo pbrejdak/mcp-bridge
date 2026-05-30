@@ -27,6 +27,8 @@ use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::endpoint::{PairEndpoint, ServeError};
 use crate::pair::invite_register::InviteRegister;
 use crate::pair::rustls_backend_verifier::RustlsBackendVerifier;
+use crate::proxy::LoopbackListener;
+use crate::proxy::listener::ListenerError;
 use crate::registry::{Registry, RegistryError};
 
 /// Run the daemon until `cancel` is signalled.
@@ -76,7 +78,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
 
     let ipc_ctx = ipc::Context {
         start: Instant::now(),
-        registry,
+        registry: registry.clone(),
         pair_endpoint_addr: bound.local_addr,
     };
     let ipc_socket_path = config.ipc_socket_path();
@@ -87,8 +89,21 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         }
     });
 
+    let loopback = LoopbackListener {
+        bind_addr: config.loopback_addr,
+        registry: registry.clone(),
+        keystore: keystore.clone(),
+    };
+    let loopback_cancel = cancel.clone();
+    let loopback_task = tokio::spawn(async move {
+        if let Err(e) = loopback.serve(loopback_cancel).await {
+            error!(error = ?e, "loopback listener exited with error");
+        }
+    });
+
     let serve_result = bound.serve(cancel).await;
     let _ = ipc_task.await;
+    let _ = loopback_task.await;
 
     info!("daemon shut down");
     serve_result.map_err(DaemonError::Serve)
@@ -146,6 +161,8 @@ pub enum DaemonError {
     Registry(#[from] RegistryError),
     #[error("pair endpoint serve loop failed: {0}")]
     Serve(#[from] ServeError),
+    #[error("loopback listener failed: {0}")]
+    Loopback(#[from] ListenerError),
 }
 
 #[cfg(test)]
@@ -169,6 +186,7 @@ mod tests {
         let config = Config::defaults()
             .unwrap()
             .with_bind_addr("127.0.0.1:0".parse().unwrap())
+            .with_loopback_addr("127.0.0.1:0".parse().unwrap())
             .with_data_dir(tmp.path());
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
