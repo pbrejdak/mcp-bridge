@@ -34,8 +34,9 @@ use axum_server::tls_rustls::RustlsConfig;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
+use crate::adapters::{Adapter, AdapterEntry, Sentinel};
 use crate::identity::{Keypair, Keystore, SelfSignedCert};
 use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
@@ -59,6 +60,17 @@ pub struct PairEndpoint {
     /// OS keychain handle. The handler writes the per-Pin bearer token
     /// and loopback key here after each successful accept.
     pub keystore: Arc<Keystore>,
+    /// Public address Consumers connect to (the loopback listener's
+    /// bind address). Used to build the per-Pin loopback URL handed
+    /// to adapters.
+    pub loopback_addr: SocketAddr,
+    /// Per-install sentinel UUID stamped onto every adapter-written
+    /// entry so revoke / uninstall touches only Bridge-managed entries.
+    pub sentinel: Sentinel,
+    /// Client Adapters to notify on successful pair. Failures here are
+    /// logged but do not fail the pair — the registry is the source of
+    /// truth, adapter writes are downstream conveniences.
+    pub adapters: Arc<Vec<Arc<dyn Adapter>>>,
 }
 
 /// Install the `ring` rustls crypto provider as the process default.
@@ -96,6 +108,9 @@ impl PairEndpoint {
             registry: self.registry,
             registry_path: self.registry_path,
             keystore: self.keystore,
+            loopback_addr: self.loopback_addr,
+            sentinel: self.sentinel,
+            adapters: self.adapters,
         })
     }
 }
@@ -115,6 +130,9 @@ pub struct BoundEndpoint {
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
     keystore: Arc<Keystore>,
+    loopback_addr: SocketAddr,
+    sentinel: Sentinel,
+    adapters: Arc<Vec<Arc<dyn Adapter>>>,
 }
 
 impl BoundEndpoint {
@@ -133,6 +151,9 @@ impl BoundEndpoint {
             registry: self.registry,
             registry_path: self.registry_path,
             keystore: self.keystore,
+            loopback_addr: self.loopback_addr,
+            sentinel: self.sentinel,
+            adapters: self.adapters,
         });
 
         let app: Router = Router::new()
@@ -163,6 +184,9 @@ struct AppState {
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
     keystore: Arc<Keystore>,
+    loopback_addr: SocketAddr,
+    sentinel: Sentinel,
+    adapters: Arc<Vec<Arc<dyn Adapter>>>,
 }
 
 async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
@@ -203,24 +227,45 @@ async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusC
 
     // Insert + persist under a single write lock so concurrent pair
     // accepts can't interleave their saves.
+    let display_name = pin.display_name.clone();
     let mut reg = state.registry.write().await;
     reg.insert(pin);
     let save_result = reg.save(&state.registry_path).await;
     drop(reg);
 
-    match save_result {
-        Ok(()) => {
-            info!(logical_id = %lid, "pair accepted and persisted");
-            StatusCode::NO_CONTENT
-        }
-        Err(e) => {
-            // The pin is in memory but not on disk. The user thinks they
-            // succeeded but a restart loses the pairing. Surface 5xx so
-            // the client knows to retry.
-            error!(error = ?e, logical_id = %lid, "registry save failed after pair accept");
-            StatusCode::INTERNAL_SERVER_ERROR
+    if let Err(e) = save_result {
+        // The pin is in memory but not on disk. The user thinks they
+        // succeeded but a restart loses the pairing. Surface 5xx so
+        // the client knows to retry.
+        error!(error = ?e, logical_id = %lid, "registry save failed after pair accept");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    let url = format!(
+        "http://{}/{}?key={}",
+        state.loopback_addr,
+        lid,
+        loopback_key.encoded(),
+    );
+    let entry = AdapterEntry {
+        logical_id: lid.clone(),
+        display_name,
+        url,
+        sentinel: state.sentinel,
+    };
+    for adapter in state.adapters.iter() {
+        if let Err(e) = adapter.write_entry(&entry).await {
+            warn!(
+                error = ?e,
+                adapter = adapter.name(),
+                logical_id = %lid,
+                "adapter write_entry failed (pair still succeeded)",
+            );
         }
     }
+
+    info!(logical_id = %lid, "pair accepted and persisted");
+    StatusCode::NO_CONTENT
 }
 
 /// Failure modes for [`PairEndpoint::bind`] and [`BoundEndpoint::serve`].

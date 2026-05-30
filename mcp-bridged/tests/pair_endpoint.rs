@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mcp_bridged::adapters::{Adapter, Sentinel};
 use mcp_bridged::identity::keystore::install_mock_backend;
 use mcp_bridged::identity::{
     DisplayName, Ed25519Pubkey, Keypair, Keystore, Signature, generate_self_signed_cert,
@@ -123,6 +124,9 @@ async fn start_endpoint(
         registry: registry.clone(),
         registry_path: registry_path.clone(),
         keystore: keystore.clone(),
+        loopback_addr: "127.0.0.1:0".parse().unwrap(),
+        sentinel: Sentinel::random(),
+        adapters: Arc::new(Vec::<Arc<dyn Adapter>>::new()),
     };
     let bound = endpoint.bind().expect("bind to 127.0.0.1:0");
     let local_addr = bound.local_addr;

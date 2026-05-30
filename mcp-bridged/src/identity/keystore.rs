@@ -27,6 +27,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use keyring::Entry;
 use thiserror::Error;
 
+use crate::adapters::Sentinel;
+use crate::adapters::sentinel::ParseError as SentinelParseError;
 use crate::pair::bearer_token::{BearerToken, BearerTokenError};
 use crate::pair::logical_id::LogicalId;
 use crate::pair::loopback_key::LoopbackKey;
@@ -40,6 +42,9 @@ pub const KEYCHAIN_SERVICE: &str = "dev.mcpbridge.mcp-bridged";
 /// Account name for the Resolver keypair. Bumping the `v1` suffix lets
 /// future encoding migrations land beside the old entry.
 pub const RESOLVER_KEYPAIR_ACCOUNT: &str = "resolver-keypair-v1";
+
+/// Account name for the per-install adapter sentinel UUID.
+pub const SENTINEL_ACCOUNT: &str = "sentinel-v1";
 
 fn bearer_account_for(lid: &LogicalId) -> String {
     format!("bearer/{}", lid.as_str())
@@ -199,6 +204,38 @@ impl Keystore {
         let account = loopback_account_for(lid);
         self.with_entry(&account, delete_if_present)
     }
+
+    // ------------------------------------------------------------------
+    // Adapter sentinel UUID
+    // ------------------------------------------------------------------
+
+    /// Load the adapter sentinel if one is stored, `Ok(None)` otherwise.
+    pub fn load_sentinel(&self) -> Result<Option<Sentinel>, KeystoreError> {
+        self.with_entry(SENTINEL_ACCOUNT, |entry| match entry.get_password() {
+            Ok(s) => Ok(Some(s.parse::<Sentinel>()?)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(KeystoreError::Backend(e)),
+        })
+    }
+
+    /// Save the adapter sentinel, overwriting any existing entry.
+    pub fn save_sentinel(&self, sentinel: Sentinel) -> Result<(), KeystoreError> {
+        self.with_entry(SENTINEL_ACCOUNT, |entry| {
+            entry
+                .set_password(&sentinel.to_string())
+                .map_err(KeystoreError::Backend)
+        })
+    }
+
+    /// Load-or-generate idiom for daemon first launch.
+    pub fn load_or_generate_sentinel(&self) -> Result<Sentinel, KeystoreError> {
+        if let Some(s) = self.load_sentinel()? {
+            return Ok(s);
+        }
+        let s = Sentinel::random();
+        self.save_sentinel(s)?;
+        Ok(s)
+    }
 }
 
 fn delete_if_present(entry: &Entry) -> Result<(), KeystoreError> {
@@ -229,6 +266,8 @@ pub enum KeystoreError {
     WrongLength { got: usize },
     #[error("stored bearer token failed validation: {0}")]
     BearerToken(#[from] BearerTokenError),
+    #[error("stored sentinel is not a valid UUID: {0}")]
+    Sentinel(#[from] SentinelParseError),
 }
 
 /// Switch the global keyring backend to the in-memory mock. Idempotent.

@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::adapters::{Adapter, ClaudeDesktopAdapter};
 use crate::config::Config;
 use crate::identity::tls_cert::GenerateError as CertGenerateError;
 use crate::identity::{Keystore, KeystoreError, generate_self_signed_cert};
@@ -63,6 +64,11 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
 
     let verifier: Arc<dyn BackendVerifier> = Arc::new(RustlsBackendVerifier::new());
 
+    let sentinel = keystore.load_or_generate_sentinel()?;
+    info!(sentinel = %sentinel, "per-install sentinel loaded");
+
+    let adapters: Arc<Vec<Arc<dyn Adapter>>> = Arc::new(vec![Arc::new(ClaudeDesktopAdapter::new())]);
+
     let endpoint = PairEndpoint {
         bind_addr: config.bind_addr,
         cert,
@@ -72,6 +78,9 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         registry: registry.clone(),
         registry_path,
         keystore: keystore.clone(),
+        loopback_addr: config.loopback_addr,
+        sentinel,
+        adapters,
     };
     let bound = endpoint.bind()?;
     info!(listening = %bound.local_addr, "pair endpoint bound");
