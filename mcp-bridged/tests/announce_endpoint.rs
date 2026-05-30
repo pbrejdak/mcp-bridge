@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcp_bridged::adapters::{Adapter, Sentinel};
+use mcp_bridged::announce::AnnounceRateLimiter;
 use mcp_bridged::announce::payload::{
     AnnounceBackend, AnnouncePayload, SpecVersion as AnnounceSpec,
 };
@@ -74,6 +75,7 @@ async fn start_endpoint() -> EndpointHandles {
         loopback_addr: "127.0.0.1:18765".parse().unwrap(),
         sentinel: Sentinel::random(),
         adapters: Arc::new(Vec::<Arc<dyn Adapter>>::new()),
+        announce_rate_limiter: Arc::new(AnnounceRateLimiter::http_default()),
     };
     let bound = endpoint.bind().expect("bind");
     let local_addr = bound.local_addr;
@@ -243,6 +245,40 @@ async fn announce_garbage_body_returns_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    h.cancel.cancel();
+    let _ = h.task.await;
+}
+
+#[tokio::test]
+async fn announce_per_lid_rate_limit_drops_burst() {
+    // SPEC §5.6 caps verifications at 1/sec/LID. Send two well-formed
+    // announces in immediate succession; the first must be accepted
+    // (consumes the LID token), the second must be rejected by the
+    // pre-signature rate-limit drop.
+    let h = start_endpoint().await;
+    let origin = seed_pin(&h, "bodylog-7f3a").await;
+
+    let p1 = signed_announce(&origin, "bodylog-7f3a", 1, [0xab; 32], None);
+    let s1 = seal_for(&p1, h.resolver.pubkey());
+    let p2 = signed_announce(&origin, "bodylog-7f3a", 2, [0xab; 32], None);
+    let s2 = seal_for(&p2, h.resolver.pubkey());
+
+    let client = https_client();
+    let url = format!("https://{}/announce", h.local_addr);
+
+    let r1 = client.post(&url).body(s1).send().await.unwrap();
+    assert_eq!(r1.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let r2 = client.post(&url).body(s2).send().await.unwrap();
+    assert_eq!(r2.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Registry stayed at seq=1 — the second announce never reached the
+    // accept path.
+    let reg = h.registry.read().await;
+    let pin = reg.get(&LogicalId::new("bodylog-7f3a").unwrap()).unwrap();
+    assert_eq!(pin.last_seen_seq, 1);
+    drop(reg);
 
     h.cancel.cancel();
     let _ = h.task.await;

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mcp_bridged::adapters::{Adapter, ClaudeDesktopAdapter, Sentinel};
+use mcp_bridged::announce::AnnounceRateLimiter;
 use mcp_bridged::identity::keystore::install_mock_backend;
 use mcp_bridged::identity::{
     DisplayName, Ed25519Pubkey, Keypair, Keystore, Signature, generate_self_signed_cert,
@@ -143,6 +144,7 @@ async fn start_endpoint_with_adapters(
         loopback_addr,
         sentinel,
         adapters,
+        announce_rate_limiter: Arc::new(AnnounceRateLimiter::http_default()),
     };
     let bound = endpoint.bind().expect("bind to 127.0.0.1:0");
     let local_addr = bound.local_addr;

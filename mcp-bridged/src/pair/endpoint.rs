@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum_server::tls_rustls::RustlsConfig;
@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::adapters::{Adapter, AdapterEntry, Sentinel};
-use crate::announce::accept_announce;
+use crate::announce::{AnnounceRateLimiter, apply_announce, parse_sealed_announce};
 use crate::identity::{Keypair, Keystore, SelfSignedCert};
 use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
@@ -72,6 +72,9 @@ pub struct PairEndpoint {
     /// logged but do not fail the pair — the registry is the source of
     /// truth, adapter writes are downstream conveniences.
     pub adapters: Arc<Vec<Arc<dyn Adapter>>>,
+    /// Per-IP + per-LID rate limiter applied to the announce endpoint
+    /// (SPEC §5.6).
+    pub announce_rate_limiter: Arc<AnnounceRateLimiter>,
 }
 
 /// Install the `ring` rustls crypto provider as the process default.
@@ -112,6 +115,7 @@ impl PairEndpoint {
             loopback_addr: self.loopback_addr,
             sentinel: self.sentinel,
             adapters: self.adapters,
+            announce_rate_limiter: self.announce_rate_limiter,
         })
     }
 }
@@ -134,6 +138,7 @@ pub struct BoundEndpoint {
     loopback_addr: SocketAddr,
     sentinel: Sentinel,
     adapters: Arc<Vec<Arc<dyn Adapter>>>,
+    announce_rate_limiter: Arc<AnnounceRateLimiter>,
 }
 
 impl BoundEndpoint {
@@ -155,6 +160,7 @@ impl BoundEndpoint {
             loopback_addr: self.loopback_addr,
             sentinel: self.sentinel,
             adapters: self.adapters,
+            announce_rate_limiter: self.announce_rate_limiter,
         });
 
         let app: Router = Router::new()
@@ -171,7 +177,7 @@ impl BoundEndpoint {
 
         axum_server::from_tcp_rustls(self.listener, tls)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .map_err(ServeError::Serve)
     }
@@ -189,6 +195,7 @@ struct AppState {
     loopback_addr: SocketAddr,
     sentinel: Sentinel,
     adapters: Arc<Vec<Arc<dyn Adapter>>>,
+    announce_rate_limiter: Arc<AnnounceRateLimiter>,
 }
 
 async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
@@ -275,20 +282,44 @@ async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusC
 /// pubkey. Success returns 204 No Content; every failure returns a
 /// bare `400 Bad Request` with no body (matching the pair endpoint's
 /// information-hiding posture).
-async fn handle_announce(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
+///
+/// Pre-signature rate-limit drops happen in two stages per SPEC §5.6:
+/// first per source IP (cheap), then per LID after unseal but before
+/// the Ed25519 verify.
+async fn handle_announce(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> StatusCode {
+    if !state.announce_rate_limiter.check_ip(peer.ip()) {
+        tracing::debug!(peer = %peer.ip(), "announce rejected: per-IP rate limit");
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let payload = match parse_sealed_announce(&body, state.resolver.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(error = ?e, "announce rejected at parse");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
+    if !state.announce_rate_limiter.check_lid(&payload.lid) {
+        tracing::debug!(
+            logical_id = %payload.lid,
+            "announce rejected: per-LID rate limit",
+        );
+        return StatusCode::BAD_REQUEST;
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let accepted = match accept_announce(&body, state.resolver.as_ref(), &state.registry, now).await
-    {
+    let accepted = match apply_announce(payload, &state.registry, now).await {
         Ok(a) => a,
         Err(e) => {
-            // Default verbosity stays quiet to avoid logging every
-            // mDNS scanner / port prober. Acceptance failures land at
-            // debug; the redaction layer in observability/ later
-            // promotes them on demand.
             tracing::debug!(error = ?e, "announce rejected");
             return StatusCode::BAD_REQUEST;
         }

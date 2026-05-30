@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::adapters::{Adapter, ClaudeDesktopAdapter};
+use crate::announce::AnnounceRateLimiter;
 use crate::config::Config;
 use crate::identity::tls_cert::GenerateError as CertGenerateError;
 use crate::identity::{Keystore, KeystoreError, generate_self_signed_cert};
@@ -81,6 +82,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         loopback_addr: config.loopback_addr,
         sentinel,
         adapters,
+        announce_rate_limiter: Arc::new(AnnounceRateLimiter::http_default()),
     };
     let bound = endpoint.bind()?;
     info!(listening = %bound.local_addr, "pair endpoint bound");

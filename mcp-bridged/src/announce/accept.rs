@@ -51,18 +51,30 @@ pub struct AcceptedAnnounce {
     pub auth_rotated: bool,
 }
 
-/// Accept a sealed `mcp-announce/v0.1` envelope end-to-end. Returns the
-/// summary of mutations on success; the caller persists the registry
-/// to disk.
-pub async fn accept_announce(
+/// Open the sealed envelope and deserialize the inner payload, without
+/// touching the registry or running the signature check.
+///
+/// Split out so the HTTP handler can apply the per-LID rate limit
+/// (SPEC §5.6) between this cheap step and the expensive sig verify
+/// in [`apply_announce`]. [`accept_announce`] is the unsplit
+/// convenience for callers that don't rate-limit.
+pub fn parse_sealed_announce(
     sealed: &[u8],
     resolver: &Keypair,
+) -> Result<AnnouncePayload, AcceptError> {
+    let plaintext = seal::open_with(sealed, resolver)?;
+    let payload: AnnouncePayload = serde_json::from_slice(&plaintext)?;
+    Ok(payload)
+}
+
+/// Apply SPEC §5.5 rules to an already-parsed announce: freshness,
+/// pin lookup, sig verify, seq, fp/auth ratchets, atomic registry
+/// update.
+pub async fn apply_announce(
+    payload: AnnouncePayload,
     registry: &Arc<RwLock<Registry>>,
     now_unix: u64,
 ) -> Result<AcceptedAnnounce, AcceptError> {
-    let plaintext = seal::open_with(sealed, resolver)?;
-    let payload: AnnouncePayload = serde_json::from_slice(&plaintext)?;
-
     let (drift_abs, ahead) = if payload.exp >= now_unix {
         (payload.exp - now_unix, true)
     } else {
@@ -136,6 +148,23 @@ pub async fn accept_announce(
         fp_changed,
         auth_rotated,
     })
+}
+
+/// Accept a sealed `mcp-announce/v0.1` envelope end-to-end. Returns the
+/// summary of mutations on success; the caller persists the registry
+/// to disk.
+///
+/// Equivalent to [`parse_sealed_announce`] then [`apply_announce`]; use
+/// the split functions when you need to rate-limit per-LID between the
+/// two steps (SPEC §5.6).
+pub async fn accept_announce(
+    sealed: &[u8],
+    resolver: &Keypair,
+    registry: &Arc<RwLock<Registry>>,
+    now_unix: u64,
+) -> Result<AcceptedAnnounce, AcceptError> {
+    let payload = parse_sealed_announce(sealed, resolver)?;
+    apply_announce(payload, registry, now_unix).await
 }
 
 /// Failure modes for [`accept_announce`]. Mapped to a bare `400 Bad
