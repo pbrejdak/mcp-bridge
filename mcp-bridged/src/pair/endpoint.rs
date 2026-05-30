@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::adapters::{Adapter, AdapterEntry, Sentinel};
+use crate::announce::accept_announce;
 use crate::identity::{Keypair, Keystore, SelfSignedCert};
 use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
@@ -158,6 +159,7 @@ impl BoundEndpoint {
 
         let app: Router = Router::new()
             .route("/pair", post(handle_pair))
+            .route("/announce", post(handle_announce))
             .with_state(state);
 
         let handle = axum_server::Handle::new();
@@ -265,6 +267,62 @@ async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusC
     }
 
     info!(logical_id = %lid, "pair accepted and persisted");
+    StatusCode::NO_CONTENT
+}
+
+/// SPEC §5.3 HTTP-POST announce carrier. The body is a libsodium
+/// `crypto_box`-sealed announce payload addressed to the Resolver's
+/// pubkey. Success returns 204 No Content; every failure returns a
+/// bare `400 Bad Request` with no body (matching the pair endpoint's
+/// information-hiding posture).
+async fn handle_announce(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let accepted = match accept_announce(&body, state.resolver.as_ref(), &state.registry, now).await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            // Default verbosity stays quiet to avoid logging every
+            // mDNS scanner / port prober. Acceptance failures land at
+            // debug; the redaction layer in observability/ later
+            // promotes them on demand.
+            tracing::debug!(error = ?e, "announce rejected");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
+    // accept_announce mutated the in-memory registry under its write
+    // lock and returned. Persist the new state to disk; failure here is
+    // the same partial-state class as a successful pair that can't be
+    // saved — surface 5xx so the Origin retries on the next interval.
+    let registry_guard = state.registry.read().await;
+    let save_result = registry_guard.save(&state.registry_path).await;
+    drop(registry_guard);
+    if let Err(e) = save_result {
+        error!(error = ?e, logical_id = %accepted.logical_id, "registry save failed after announce accept");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    if accepted.auth_rotated {
+        // SPEC §5.7: re-fetch the bearer token via the pinned backend
+        // and rotate. The control-call shape is governed by the Origin
+        // host application's API and is out of scope for v0.1.
+        warn!(
+            logical_id = %accepted.logical_id,
+            "announce signalled bearer-token rotation; §5.7 re-fetch is not yet implemented",
+        );
+    }
+
+    info!(
+        logical_id = %accepted.logical_id,
+        seq = accepted.new_seq,
+        fp_changed = accepted.fp_changed,
+        auth_rotated = accepted.auth_rotated,
+        "announce accepted",
+    );
     StatusCode::NO_CONTENT
 }
 
