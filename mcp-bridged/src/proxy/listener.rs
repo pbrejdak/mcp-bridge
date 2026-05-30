@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, StatusCode, Uri};
 use axum::response::Response;
@@ -211,7 +211,7 @@ fn to_axum_response(resp: super::connector::ForwardResponse) -> Response {
         builder = builder.header(name, value);
     }
     builder
-        .body(Body::from(Bytes::from(resp.body)))
+        .body(Body::from_stream(resp.body))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 

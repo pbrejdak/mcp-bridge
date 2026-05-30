@@ -30,15 +30,17 @@ axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
 blake2 = "0.10"
+bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 constant_time_eq = "0.3"
 crypto_box = "0.9"
 directories = "5"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+futures-core = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "crypto-rust"] }
 rcgen = "0.13"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1"
 secrecy = "0.10"
@@ -58,6 +60,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util", "net"] }

@@ -2,12 +2,16 @@
 //! certificate SHA-256 and authenticated with its bearer token.
 //!
 //! Per [`docs/ARCHITECTURE.md`](../../../../docs/ARCHITECTURE.md) §3.1:
-//! one [`OriginConnector`] per registered Server Pin. Phase 1 is
-//! buffered (request body and response body collected end-to-end);
-//! SSE streaming for MCP `tools/call` results lands in a follow-up.
+//! one [`OriginConnector`] per registered Server Pin. The request body
+//! is buffered up to a small cap (MCP requests are JSON-shaped and
+//! small); the response body is streamed so SSE `text/event-stream`
+//! responses pass through without blocking on full-body completion.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use futures_core::Stream;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
 use rustls::ClientConfig;
@@ -18,6 +22,12 @@ use crate::pair::bearer_token::BearerToken;
 use crate::pair::cert_fingerprint::CertFingerprint;
 
 use super::pinning_verifier::PinningVerifier;
+
+/// Stream of body chunks coming back from the pinned backend. One
+/// boxed item per chunk reqwest hands us — SSE messages, ordinary
+/// body bytes, or the trailing transfer-encoding fragment.
+pub type ResponseBodyStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
 
 /// Forward-request shape — the listener's handler boils its incoming
 /// `axum::Request` down to this before calling [`OriginConnector::forward`].
@@ -32,12 +42,13 @@ pub struct ForwardRequest {
 }
 
 /// Forward-response shape — what the listener's handler turns back into
-/// an `axum::Response`.
-#[derive(Debug)]
+/// an `axum::Response`. The body is a stream so SSE pass-through
+/// doesn't have to wait for the backend to close the connection.
+#[allow(missing_debug_implementations)] // Stream trait object is not Debug.
 pub struct ForwardResponse {
     pub status: reqwest::StatusCode,
     pub headers: HeaderMap,
-    pub body: Vec<u8>,
+    pub body: ResponseBodyStream,
 }
 
 /// Headers we strip from the incoming Consumer request before forwarding.
@@ -131,11 +142,7 @@ impl OriginConnector {
         let resp = builder.send().await.map_err(ConnectorError::Send)?;
         let status = resp.status();
         let headers = resp.headers().clone();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(ConnectorError::ReadBody)?
-            .to_vec();
+        let body: ResponseBodyStream = Box::pin(resp.bytes_stream());
 
         Ok(ForwardResponse {
             status,
@@ -169,8 +176,6 @@ pub enum ConnectorError {
     BadPath { got: String },
     #[error("request to backend failed: {0}")]
     Send(#[source] reqwest::Error),
-    #[error("could not read response body: {0}")]
-    ReadBody(#[source] reqwest::Error),
 }
 
 #[cfg(test)]

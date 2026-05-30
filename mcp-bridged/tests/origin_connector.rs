@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::any;
@@ -145,10 +145,16 @@ async fn matching_fingerprint_and_bearer_forwards_successfully() {
         body: br#"{"name":"echo","args":{"x":1}}"#.to_vec(),
     };
 
-    let resp = connector.forward(req).await.expect("forward");
+    let resp = connector
+        .forward(req)
+        .await
+        .unwrap_or_else(|e| panic!("forward failed: {e}"));
     assert_eq!(resp.status, reqwest::StatusCode::OK);
 
-    let parsed: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+    let body_bytes = axum::body::to_bytes(Body::from_stream(resp.body), usize::MAX)
+        .await
+        .expect("drain body");
+    let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(parsed["method"], "POST");
     assert_eq!(parsed["path"], "/tools/call");
     assert_eq!(parsed["bearer_header"], format!("Bearer {bearer}"));
@@ -175,7 +181,10 @@ async fn wrong_fingerprint_fails_at_handshake() {
         body: Vec::new(),
     };
 
-    let err = connector.forward(req).await.expect_err("must fail");
+    let err = match connector.forward(req).await {
+        Ok(_) => panic!("forward must fail"),
+        Err(e) => e,
+    };
     assert!(matches!(err, ConnectorError::Send(_)));
 
     cancel.cancel();
@@ -203,6 +212,9 @@ async fn unreachable_backend_returns_send_error() {
         headers: HeaderMap::new(),
         body: Vec::new(),
     };
-    let err = connector.forward(req).await.expect_err("must fail");
+    let err = match connector.forward(req).await {
+        Ok(_) => panic!("forward must fail"),
+        Err(e) => e,
+    };
     assert!(matches!(err, ConnectorError::Send(_)));
 }
