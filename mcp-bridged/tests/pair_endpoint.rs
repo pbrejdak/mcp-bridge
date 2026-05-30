@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mcp_bridged::adapters::{Adapter, Sentinel};
+use mcp_bridged::adapters::{Adapter, ClaudeDesktopAdapter, Sentinel};
 use mcp_bridged::identity::keystore::install_mock_backend;
 use mcp_bridged::identity::{
     DisplayName, Ed25519Pubkey, Keypair, Keystore, Signature, generate_self_signed_cert,
@@ -88,6 +88,8 @@ struct EndpointHandles {
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
     keystore: Arc<Keystore>,
+    sentinel: Sentinel,
+    loopback_addr: SocketAddr,
     _tmp: TempDir,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
@@ -98,6 +100,15 @@ struct EndpointHandles {
 /// to drive and inspect the running server.
 async fn start_endpoint(
     backend_verifier: Arc<dyn mcp_bridged::pair::backend_verifier::BackendVerifier>,
+) -> EndpointHandles {
+    start_endpoint_with_adapters(backend_verifier, Arc::new(Vec::new())).await
+}
+
+/// Variant of [`start_endpoint`] that lets a test supply adapters to be
+/// invoked after a successful pair accept.
+async fn start_endpoint_with_adapters(
+    backend_verifier: Arc<dyn mcp_bridged::pair::backend_verifier::BackendVerifier>,
+    adapters: Arc<Vec<Arc<dyn Adapter>>>,
 ) -> EndpointHandles {
     install_mock_backend();
 
@@ -115,6 +126,11 @@ async fn start_endpoint(
     let unique = format!("test-{}", uuid_like());
     let keystore = Arc::new(Keystore::for_service(&unique).expect("keystore"));
 
+    let sentinel = Sentinel::random();
+    // A made-up loopback address — tests don't actually serve traffic
+    // on it; they just assert the URL the adapter writes refers to it.
+    let loopback_addr: SocketAddr = "127.0.0.1:18765".parse().unwrap();
+
     let endpoint = PairEndpoint {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         cert,
@@ -124,9 +140,9 @@ async fn start_endpoint(
         registry: registry.clone(),
         registry_path: registry_path.clone(),
         keystore: keystore.clone(),
-        loopback_addr: "127.0.0.1:0".parse().unwrap(),
-        sentinel: Sentinel::random(),
-        adapters: Arc::new(Vec::<Arc<dyn Adapter>>::new()),
+        loopback_addr,
+        sentinel,
+        adapters,
     };
     let bound = endpoint.bind().expect("bind to 127.0.0.1:0");
     let local_addr = bound.local_addr;
@@ -146,6 +162,8 @@ async fn start_endpoint(
         registry,
         registry_path,
         keystore,
+        sentinel,
+        loopback_addr,
         _tmp: tmp,
         cancel,
         task,
@@ -257,6 +275,61 @@ async fn backend_fingerprint_mismatch_returns_400() {
     let url = format!("https://{}/pair", h.local_addr);
     let resp = client.post(&url).body(sealed).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    h.cancel.cancel();
+    let _ = h.task.await;
+}
+
+#[tokio::test]
+async fn happy_path_writes_adapter_entry_with_sentinel_and_loopback_url() {
+    // ClaudeDesktopAdapter pointed at a tempdir-backed config file.
+    // After a successful pair, the file must contain a `mcpServers/<lid>`
+    // entry with url = loopback URL + sentinel = our per-install UUID.
+    let adapter_tmp = tempfile::tempdir().unwrap();
+    let config_path = adapter_tmp.path().join("claude_desktop_config.json");
+    let adapter = Arc::new(ClaudeDesktopAdapter::with_config_path(config_path.clone()));
+    let adapters: Arc<Vec<Arc<dyn Adapter>>> = Arc::new(vec![adapter]);
+
+    let h = start_endpoint_with_adapters(Arc::new(AlwaysAccept), adapters).await;
+
+    let lan_addr = lan_addr_for(h.local_addr);
+    let (invite, payload) = build_signed_pair(&h.resolver, 4, &lan_addr);
+    h.invites.register(invite).await.unwrap();
+    let sealed = seal_payload(&payload, h.resolver.pubkey());
+
+    let client = https_client();
+    let url = format!("https://{}/pair", h.local_addr);
+    let resp = client.post(&url).body(sealed).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    // Adapter file exists.
+    assert!(config_path.exists(), "adapter config file must be written");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let lid = payload.origin.logical_id.as_str();
+    let entry = json
+        .get("mcpServers")
+        .and_then(|m| m.get(lid))
+        .expect("entry must be present under mcpServers/<lid>");
+
+    let entry_url = entry
+        .get("url")
+        .and_then(|v| v.as_str())
+        .expect("entry must carry a url");
+    let prefix = format!("http://{}/{}?key=", h.loopback_addr, lid);
+    assert!(
+        entry_url.starts_with(&prefix),
+        "url {entry_url} must start with {prefix}",
+    );
+    // 32-byte key → 43 base64url-no-pad chars.
+    let key_suffix = entry_url.strip_prefix(&prefix).unwrap();
+    assert_eq!(key_suffix.len(), 43, "url must end with 43-char key");
+
+    let sentinel_str = entry
+        .get("_mcp_bridge_managed")
+        .and_then(|v| v.as_str())
+        .expect("entry must carry the sentinel marker");
+    assert_eq!(sentinel_str, h.sentinel.to_string());
 
     h.cancel.cancel();
     let _ = h.task.await;
