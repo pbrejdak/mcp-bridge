@@ -5,12 +5,15 @@
 //!
 //! Submodules:
 //! - [`payload`] — signed announce body + canonical-JSON / sig verify.
+//! - [`accept`] — sealed bytes → registry mutation (SPEC §5.5 rules).
 //!
-//! Submodules to land: `accept`, `unicast`, `bonjour`.
+//! Submodules to land: `unicast`, `bonjour`.
 //!
 //! [`docs/SPEC.md`]: ../../../../docs/SPEC.md
 //! [`docs/DAEMON.md`]: ../../../../docs/DAEMON.md
 
+pub mod accept;
 pub mod payload;
 
+pub use accept::{AcceptError, AcceptedAnnounce, accept_announce};
 pub use payload::{AnnounceBackend, AnnouncePayload, SpecVersion, ValidationError};
