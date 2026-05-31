@@ -4,9 +4,37 @@ A privacy-first universal pairing tool that connects mobile-hosted MCP servers t
 
 ## Status
 
-**Exploratory.** This repository currently contains design documentation only — no code has been written yet. The documentation set is comprehensive and treats the architecture as committed for planning purposes, but every claim is aspirational until the implementation lands.
+**Pre-release.** Phase 1 of [docs/ROADMAP.md](docs/ROADMAP.md) is implemented: the `mcp-bridged` Rust daemon ships a working pair endpoint, announce endpoint, loopback proxy with SSE streaming, OS keychain-backed identity, a JSON-RPC IPC surface (Unix-domain socket on Unix, named pipe on Windows), and a `mcp-bridge` CLI for the day-to-day flow. The Bridge Console (Tauri + Svelte) and the mobile SDKs are still on paper — Phase 2 / 3 of the roadmap. Treat the wire protocol as not yet frozen until v0.1.0 ships.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the cross-cutting design.
+
+## Quickstart (CLI, macOS)
+
+```sh
+# Build the daemon + CLI (a single binary named `mcp-bridge`).
+cargo build --release --bin mcp-bridge
+
+# Option A — register the daemon to start at login.
+./target/release/mcp-bridge daemon --install
+
+# Option B — run it in the foreground for development.
+./target/release/mcp-bridge daemon
+
+# Pair a phone (prints a QR + SAS phrase; waits up to 60s for the POST).
+./target/release/mcp-bridge pair
+
+# Inspect what's paired.
+./target/release/mcp-bridge list
+./target/release/mcp-bridge show <pin-id>
+
+# Revoke when done.
+./target/release/mcp-bridge revoke <pin-id>
+
+# Tear down the launchd unit when removing.
+./target/release/mcp-bridge daemon --uninstall
+```
+
+Linux systemd-user and Windows Scheduled Task installers are pending; on those platforms run `mcp-bridge daemon` in the foreground for now.
 
 ## What it does
 
