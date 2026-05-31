@@ -343,7 +343,11 @@ async fn call_windows(
     read_frame(&mut pipe).await
 }
 
-#[cfg(test)]
+// Every test in this module exercises the Unix-domain-socket path
+// (UDS-specific tooling, mode-0600 perms). Windows tests would need
+// a different harness using ServerOptions/ClientOptions and live in a
+// follow-up commit.
+#[cfg(all(test, unix))]
 mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};

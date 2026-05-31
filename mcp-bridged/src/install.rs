@@ -530,3 +530,111 @@ mod linux {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// Windows — Scheduled Task triggered at user logon
+// ---------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use crate::config::Config;
+
+    use super::{InstallError, InstallReport, UninstallReport};
+
+    /// Task name in the Task Scheduler. Forward-slashes aren't legal in
+    /// task names; dotted bundle-ID form works.
+    const TASK_NAME: &str = "dev.mcpbridge.mcp-bridged";
+
+    pub(super) fn install(config: &Config) -> Result<InstallReport, InstallError> {
+        let binary = std::env::current_exe().map_err(InstallError::CurrentExe)?;
+        let log_dir = config.data_dir.join("logs");
+        if let Err(e) = std::fs::create_dir_all(&log_dir) {
+            return Err(InstallError::WriteUnit {
+                path: log_dir,
+                source: e,
+            });
+        }
+
+        // /F overwrites if the task already exists, so install is
+        // idempotent without us probing for prior state.
+        let replaced_existing = task_exists();
+
+        // /TR wants ONE string: the binary path plus its arguments,
+        // with the binary path quoted if it contains spaces. We
+        // intentionally don't redirect stdout/stderr here — Scheduled
+        // Task doesn't natively support log redirection, and wiring it
+        // through cmd /c would complicate quoting. The daemon's own
+        // tracing layer logs to data_dir/logs/.
+        let _ = log_dir; // reserved for future redirection
+        let tr = format!("\"{}\" daemon", binary.to_string_lossy());
+
+        run_schtasks(&[
+            "/Create",
+            "/TN",
+            TASK_NAME,
+            "/TR",
+            &tr,
+            "/SC",
+            "ONLOGON",
+            "/RL",
+            "LIMITED",
+            "/F",
+        ])?;
+        // Start it immediately so the user doesn't have to log out / in.
+        let _ = run_schtasks(&["/Run", "/TN", TASK_NAME]);
+
+        // The Scheduled Task store isn't a filesystem path, so the
+        // unit_path field reports the conventional `Tasks\<name>`
+        // pseudo-path used in `schtasks /Query` output.
+        let unit_path = PathBuf::from(format!(r"\{TASK_NAME}"));
+        Ok(InstallReport {
+            unit_path,
+            replaced_existing,
+        })
+    }
+
+    pub(super) fn uninstall(_config: &Config) -> Result<UninstallReport, InstallError> {
+        let unit_path = PathBuf::from(format!(r"\{TASK_NAME}"));
+        if !task_exists() {
+            return Ok(UninstallReport {
+                unit_path,
+                removed: false,
+            });
+        }
+        run_schtasks(&["/End", "/TN", TASK_NAME]).ok();
+        run_schtasks(&["/Delete", "/TN", TASK_NAME, "/F"])?;
+        Ok(UninstallReport {
+            unit_path,
+            removed: true,
+        })
+    }
+
+    fn task_exists() -> bool {
+        Command::new("schtasks")
+            .args(["/Query", "/TN", TASK_NAME])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn run_schtasks(args: &[&str]) -> Result<(), InstallError> {
+        let output = Command::new("schtasks")
+            .args(args)
+            .output()
+            .map_err(|e| InstallError::SpawnLaunchTool {
+                cmd: format!("schtasks {}", args.join(" ")),
+                source: e,
+            })?;
+        if !output.status.success() {
+            return Err(InstallError::LaunchToolFailed {
+                cmd: format!("schtasks {}", args.join(" ")),
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
