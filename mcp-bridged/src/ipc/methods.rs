@@ -30,6 +30,7 @@ use super::wire::{JsonRpcRequest, JsonRpcResponse};
 pub mod method_names {
     pub const DAEMON_STATUS: &str = "daemon.status";
     pub const SERVERS_LIST: &str = "servers.list";
+    pub const SERVERS_DETAIL: &str = "servers.detail";
     pub const PAIR_INVITE_START: &str = "pair.invite_start";
     pub const PAIR_INVITE_CANCEL: &str = "pair.invite_cancel";
     pub const SERVERS_REVOKE: &str = "servers.revoke";
@@ -88,6 +89,12 @@ pub struct DaemonStatus {
     pub pair_endpoint: String,
 }
 
+/// Request body for [`method_names::SERVERS_DETAIL`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServersDetailParams {
+    pub pin_id: LogicalId,
+}
+
 /// Request body for [`method_names::PAIR_INVITE_CANCEL`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairInviteCancelParams {
@@ -142,6 +149,7 @@ pub struct ServerListEntry {
 ///
 /// Unknown methods get a JSON-RPC -32601 (method not found) so the
 /// caller can distinguish protocol-level failures from transport ones.
+#[allow(clippy::too_many_lines)] // Single dispatcher; one arm per IPC method by design.
 pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
     let id = req.id;
     match req.method.as_str() {
@@ -164,6 +172,36 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     id,
                     error_codes::INTERNAL_ERROR,
                     format!("could not serialize servers list: {e}"),
+                ),
+            }
+        }
+        method_names::SERVERS_DETAIL => {
+            let params: ServersDetailParams = match req
+                .params
+                .as_ref()
+                .ok_or_else(|| "missing `params` (expected { pin_id })".to_owned())
+                .and_then(|v| serde_json::from_value(v.clone()).map_err(|e| format!("{e}")))
+            {
+                Ok(p) => p,
+                Err(msg) => {
+                    return JsonRpcResponse::error(id, error_codes::INVALID_PARAMS, msg);
+                }
+            };
+            let registry_guard = ctx.registry.read().await;
+            let Some(pin) = registry_guard.get(&params.pin_id).cloned() else {
+                return JsonRpcResponse::error(
+                    id,
+                    error_codes::INVALID_PARAMS,
+                    "no pin matches that pin_id".to_owned(),
+                );
+            };
+            drop(registry_guard);
+            match serde_json::to_value(&pin) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize pin: {e}"),
                 ),
             }
         }
@@ -585,6 +623,68 @@ mod tests {
             one["nonce"], two["nonce"],
             "fresh invites must carry distinct nonces"
         );
+    }
+
+    #[tokio::test]
+    async fn servers_detail_returns_full_pin_for_a_known_lid() {
+        let ctx = make_ctx();
+        {
+            let mut reg = ctx.registry.write().await;
+            reg.insert(sample_pin("BodyLog", "bodylog-7f3a", 1_700_000_000));
+        }
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::SERVERS_DETAIL.to_owned(),
+                params: Some(serde_json::json!({ "pin_id": "bodylog-7f3a" })),
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        assert_eq!(result["logical_id"], "bodylog-7f3a");
+        assert_eq!(result["display_name"], "BodyLog");
+        assert_eq!(result["state"], "Reachable");
+        assert_eq!(result["backend_url"], "https://10.0.0.42:54321/");
+        assert_eq!(result["created_at"], 1_700_000_000);
+        // Sanity: no secret material leaks.
+        assert!(result.get("bearer_token").is_none());
+        assert!(result.get("loopback_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn servers_detail_unknown_pin_returns_invalid_params() {
+        let ctx = make_ctx();
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(2),
+                method: method_names::SERVERS_DETAIL.to_owned(),
+                params: Some(serde_json::json!({ "pin_id": "nope-9999" })),
+            },
+            &ctx,
+        )
+        .await;
+        let err = resp.error.expect("missing pin must be an error");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn servers_detail_missing_params_returns_invalid_params() {
+        let ctx = make_ctx();
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(3),
+                method: method_names::SERVERS_DETAIL.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let err = resp.error.expect("missing params must be an error");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS);
     }
 
     #[tokio::test]

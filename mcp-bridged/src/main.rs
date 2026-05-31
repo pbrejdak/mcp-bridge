@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
         Command::Status => run_status(json_output).await,
         Command::Pair => run_pair(json_output).await,
         Command::List => run_list(json_output).await,
-        Command::Show { .. } => not_implemented("show"),
+        Command::Show { pin } => run_show(pin, json_output).await,
         Command::Revoke { pin, consumer } => run_revoke(pin, consumer, json_output).await,
         Command::Logs { .. } => not_implemented("logs"),
         Command::Diagnostics => not_implemented("diagnostics"),
@@ -180,6 +180,69 @@ async fn run_list(json_output: bool) -> Result<()> {
     let entries: Vec<ipc::ServerListEntry> =
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
+    Ok(())
+}
+
+/// `mcp-bridge show <pin>` — call servers.detail and render the full
+/// (secret-free) pin record. Output goes one field per line for human
+/// reading; `--json` passes the raw response through.
+async fn run_show(pin: String, json_output: bool) -> Result<()> {
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("show-1"),
+        method: ipc::method_names::SERVERS_DETAIL.to_owned(),
+        params: Some(serde_json::json!({ "pin_id": pin })),
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let str_field = |k: &str| {
+        result
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_owned()
+    };
+    let scope = result.get("scope").and_then(|v| v.as_array()).map_or_else(
+        || "?".to_owned(),
+        |arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+    );
+    let opt_u64 = |k: &str| {
+        result
+            .get(k)
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "-".to_owned(), |n| n.to_string())
+    };
+
+    println!("PIN ID         {}", str_field("logical_id"));
+    println!("NAME           {}", str_field("display_name"));
+    println!("STATE          {}", str_field("state"));
+    println!("SCOPE          {scope}");
+    println!("BACKEND URL    {}", str_field("backend_url"));
+    println!("BACKEND FP     {}", str_field("backend_fp"));
+    println!("ORIGIN PUBKEY  {}", str_field("origin_pubkey"));
+    println!("PAIRED (unix)  {}", opt_u64("created_at"));
+    println!("LAST SEEN SEQ  {}", opt_u64("last_seen_seq"));
+    println!("AUTH ROTATED   {}", opt_u64("auth_rotated_at"));
+    println!("CERT ROTATED   {}", opt_u64("cert_rotated_at"));
     Ok(())
 }
 
