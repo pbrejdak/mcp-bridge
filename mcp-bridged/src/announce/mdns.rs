@@ -162,10 +162,12 @@ pub enum SubscribeError {
 /// In-memory [`MdnsSubscriber`] implementation. Tests inject
 /// [`MdnsAnnouncement`] values via [`FakeMdnsSubscriber::push`] and the
 /// accept-bridge task observes them as if a real publisher had emitted
-/// them.
+/// them. [`FakeMdnsSubscriber::subscribe_count`] reports how many times
+/// the bridge re-subscribed — useful for day-rollover tests.
 #[derive(Debug, Default)]
 pub struct FakeMdnsSubscriber {
     sender: tokio::sync::Mutex<Option<mpsc::Sender<MdnsAnnouncement>>>,
+    subscribe_count: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeMdnsSubscriber {
@@ -182,6 +184,14 @@ impl FakeMdnsSubscriber {
             let _ = tx.send(ann).await;
         }
     }
+
+    /// Number of `subscribe` calls observed so far. Used by tests to
+    /// confirm day-rollover re-subscribes.
+    #[must_use]
+    pub fn subscribe_count(&self) -> usize {
+        self.subscribe_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
@@ -192,6 +202,8 @@ impl MdnsSubscriber for FakeMdnsSubscriber {
     ) -> Result<mpsc::Receiver<MdnsAnnouncement>, SubscribeError> {
         let (tx, rx) = mpsc::channel(32);
         *self.sender.lock().await = Some(tx);
+        self.subscribe_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(rx)
     }
 }
@@ -204,9 +216,10 @@ impl MdnsSubscriber for FakeMdnsSubscriber {
 /// stale exp, replay seq) are logged at debug or warn and the loop
 /// continues. The only way out is via `cancel`.
 ///
-/// Day-rollover (re-subscribing at UTC midnight when the service-type
-/// HMAC rotates) is a TODO; today the daemon needs a restart to roll
-/// to a new day's service type.
+/// Day-rollover: the service-type HMAC rotates at UTC midnight. The
+/// outer loop sleeps until the next UTC midnight (plus a 5s buffer),
+/// drops the current subscription, and re-subscribes with the freshly
+/// derived [today, yesterday] pair.
 pub async fn serve_mdns(
     subscriber: Arc<dyn MdnsSubscriber>,
     resolver: Arc<Keypair>,
@@ -215,31 +228,56 @@ pub async fn serve_mdns(
     rate_limiter: Arc<AnnounceRateLimiter>,
     cancel: CancellationToken,
 ) -> Result<(), SubscribeError> {
-    let service_types = current_and_previous_service_types(resolver.pubkey()).to_vec();
-    info!(?service_types, "mDNS subscriber starting");
-    let mut rx = subscriber.subscribe(&service_types).await?;
     loop {
-        tokio::select! {
-            () = cancel.cancelled() => {
-                info!("mDNS subscriber shutting down");
-                return Ok(());
-            }
-            ann = rx.recv() => {
-                let Some(ann) = ann else {
-                    warn!("mDNS subscriber channel closed; exiting loop");
+        let service_types = current_and_previous_service_types(resolver.pubkey()).to_vec();
+        info!(?service_types, "mDNS subscriber (re)subscribing");
+        let mut rx = subscriber.subscribe(&service_types).await?;
+        let rollover_at = next_utc_midnight_instant();
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    info!("mDNS subscriber shutting down");
                     return Ok(());
-                };
-                handle_announcement(
-                    ann,
-                    resolver.as_ref(),
-                    &registry,
-                    &registry_path,
-                    rate_limiter.as_ref(),
-                )
-                .await;
+                }
+                () = tokio::time::sleep_until(rollover_at) => {
+                    info!("UTC day rolled over; refreshing mDNS subscription");
+                    break;
+                }
+                ann = rx.recv() => {
+                    let Some(ann) = ann else {
+                        warn!("mDNS subscriber channel closed; exiting loop");
+                        return Ok(());
+                    };
+                    handle_announcement(
+                        ann,
+                        resolver.as_ref(),
+                        &registry,
+                        &registry_path,
+                        rate_limiter.as_ref(),
+                    )
+                    .await;
+                }
             }
         }
+        // Dropping `rx` here causes the per-service-type drain tasks
+        // inside the subscriber backend to observe `tx.send` failure
+        // and exit. The next outer-loop iteration creates a fresh
+        // subscription with the new service types.
     }
+}
+
+/// `tokio::time::Instant` corresponding to the next UTC midnight,
+/// plus a five-second buffer so we never refresh microseconds before
+/// the date string actually rolls.
+fn next_utc_midnight_instant() -> tokio::time::Instant {
+    let now_wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs_into_day = now_wall % 86_400;
+    let secs_to_next_midnight = 86_400 - secs_into_day + 5;
+    tokio::time::Instant::now() + std::time::Duration::from_secs(secs_to_next_midnight)
 }
 
 /// Process one [`MdnsAnnouncement`]. Mirrors the HTTP `/announce`
@@ -433,6 +471,23 @@ mod tests {
         let mut txt = HashMap::new();
         txt.insert("body".to_owned(), "!!!not-base64!!!".to_owned());
         assert!(matches!(decode_txt_body(&txt), Err(DecodeError::Base64(_))));
+    }
+
+    #[test]
+    fn next_utc_midnight_is_within_one_day_plus_buffer() {
+        let now = tokio::time::Instant::now();
+        let at = next_utc_midnight_instant();
+        let dur = at.saturating_duration_since(now);
+        assert!(
+            dur.as_secs() <= 86_400 + 5,
+            "next midnight must be within a day + 5s buffer (got {}s)",
+            dur.as_secs(),
+        );
+        assert!(
+            dur.as_secs() >= 5,
+            "next midnight must be at least the 5s buffer away (got {}s)",
+            dur.as_secs(),
+        );
     }
 
     #[tokio::test]

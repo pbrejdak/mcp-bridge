@@ -179,6 +179,63 @@ async fn mdns_serve_accepts_a_signed_announce_and_persists() {
     let _ = task.await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn mdns_serve_resubscribes_after_utc_midnight() {
+    // Drive the outer loop through a synthetic day-rollover. paused
+    // time advances cheaply; the bridge should drop its current
+    // subscription and re-subscribe via the trait once we cross the
+    // 24h boundary.
+    let resolver = Arc::new(Keypair::generate());
+    let (registry, _origin, registry_path, _tmp) =
+        seed_registry(*resolver.pubkey(), "bodylog-7f3a");
+
+    let subscriber = Arc::new(FakeMdnsSubscriber::new());
+    let rate_limiter = Arc::new(AnnounceRateLimiter::mdns_default());
+    let cancel = CancellationToken::new();
+
+    let subscriber_for_task: Arc<dyn MdnsSubscriber> = subscriber.clone();
+    let task = tokio::spawn({
+        let resolver = resolver.clone();
+        let registry = registry.clone();
+        let registry_path = registry_path.clone();
+        let cancel = cancel.clone();
+        async move {
+            mdns::serve_mdns(
+                subscriber_for_task,
+                resolver,
+                registry,
+                registry_path,
+                rate_limiter,
+                cancel,
+            )
+            .await
+        }
+    });
+
+    // Let the first subscribe happen.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        subscriber.subscribe_count(),
+        1,
+        "must subscribe once on startup",
+    );
+
+    // Cross any possible UTC midnight (real-time `now` is somewhere
+    // inside today, so 86_405s is always strictly past the next
+    // midnight, regardless of when the test happens to run).
+    tokio::time::advance(Duration::from_secs(86_410)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(
+        subscriber.subscribe_count(),
+        2,
+        "must re-subscribe after the UTC midnight rollover",
+    );
+
+    cancel.cancel();
+    let _ = task.await;
+}
+
 #[tokio::test]
 async fn mdns_serve_drops_malformed_txt_without_touching_registry() {
     let resolver = Arc::new(Keypair::generate());
