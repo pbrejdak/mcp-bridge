@@ -124,64 +124,73 @@ async fn run_status(json_output: bool) -> Result<()> {
     let config = Config::defaults().context("resolving default config")?;
     let socket = config.ipc_socket_path();
 
-    #[cfg(not(unix))]
-    {
-        let _ = (json_output, socket);
-        bail!("`mcp-bridge status` is not yet implemented on this platform");
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("status-1"),
+        method: ipc::method_names::DAEMON_STATUS.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
     }
 
-    #[cfg(unix)]
-    {
-        if !socket.exists() {
-            bail!(
-                "daemon does not appear to be running ({} is missing). \
-                 Start it with `mcp-bridge daemon`.",
-                socket.display()
-            );
-        }
-
-        let request = ipc::JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: serde_json::json!("status-1"),
-            method: ipc::method_names::DAEMON_STATUS.to_owned(),
-            params: None,
-        };
-        let response = ipc::call_unix(&socket, &request)
-            .await
-            .map_err(|e| anyhow!("could not reach daemon over IPC: {e}"))?;
-
-        if let Some(err) = response.error {
-            bail!("daemon returned error {}: {}", err.code, err.message);
-        }
-        let result = response
-            .result
-            .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
-
-        if json_output {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            return Ok(());
-        }
-
-        let status: ipc::DaemonStatus =
-            serde_json::from_value(result).context("decoding daemon.status response")?;
-        println!("mcp-bridged v{}", status.version);
-        println!("uptime         {}s", status.uptime_seconds);
-        println!("pair endpoint  {}", status.pair_endpoint);
-        println!("pin count      {}", status.pin_count);
-        Ok(())
-    }
+    let status: ipc::DaemonStatus =
+        serde_json::from_value(result).context("decoding daemon.status response")?;
+    println!("mcp-bridged v{}", status.version);
+    println!("uptime         {}s", status.uptime_seconds);
+    println!("pair endpoint  {}", status.pair_endpoint);
+    println!("pin count      {}", status.pin_count);
+    Ok(())
 }
 
 async fn run_list(json_output: bool) -> Result<()> {
     let config = Config::defaults().context("resolving default config")?;
     let socket = config.ipc_socket_path();
 
-    #[cfg(not(unix))]
-    {
-        let _ = (json_output, socket);
-        bail!("`mcp-bridge list` is not yet implemented on this platform");
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("list-1"),
+        method: ipc::method_names::SERVERS_LIST.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
     }
 
+    let entries: Vec<ipc::ServerListEntry> =
+        serde_json::from_value(result).context("decoding servers.list response")?;
+    render_servers_table(&entries);
+    Ok(())
+}
+
+/// Wrap [`ipc::call_local`] with a CLI-friendly error message when the
+/// daemon isn't running. On Unix we can fast-path with `socket.exists()`;
+/// on Windows the named pipe isn't a filesystem object, so we let the
+/// connect attempt fail and translate the I/O error to a hint.
+async fn call_with_friendly_error(
+    socket: &std::path::Path,
+    request: &ipc::JsonRpcRequest,
+) -> Result<ipc::JsonRpcResponse> {
     #[cfg(unix)]
     {
         if !socket.exists() {
@@ -191,34 +200,13 @@ async fn run_list(json_output: bool) -> Result<()> {
                 socket.display()
             );
         }
-
-        let request = ipc::JsonRpcRequest {
-            jsonrpc: "2.0".to_owned(),
-            id: serde_json::json!("list-1"),
-            method: ipc::method_names::SERVERS_LIST.to_owned(),
-            params: None,
-        };
-        let response = ipc::call_unix(&socket, &request)
-            .await
-            .map_err(|e| anyhow!("could not reach daemon over IPC: {e}"))?;
-
-        if let Some(err) = response.error {
-            bail!("daemon returned error {}: {}", err.code, err.message);
-        }
-        let result = response
-            .result
-            .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
-
-        if json_output {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            return Ok(());
-        }
-
-        let entries: Vec<ipc::ServerListEntry> =
-            serde_json::from_value(result).context("decoding servers.list response")?;
-        render_servers_table(&entries);
-        Ok(())
     }
+    ipc::call_local(socket, request)
+        .await
+        .map_err(|e| anyhow!(
+            "could not reach daemon over IPC: {e}\n\
+             Is the daemon running? Start it with `mcp-bridge daemon`."
+        ))
 }
 
 fn render_servers_table(entries: &[ipc::ServerListEntry]) {

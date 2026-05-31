@@ -1,5 +1,13 @@
-//! UDS-based IPC server. Unix only at Phase 1; Windows named-pipe
-//! support lands in a follow-up commit.
+//! Local IPC server for the Bridge Console and CLI.
+//!
+//! Transport is per-platform:
+//! - Unix: a Unix-domain socket, mode 0600, under the daemon's data dir.
+//! - Windows: a named pipe at `\\.\pipe\mcp-bridge-control`, with the
+//!   default DACL (creator + LocalSystem). Hardening the DACL down to
+//!   the current user only is tracked as a follow-up.
+//!
+//! Wire format and dispatcher are identical across platforms — only the
+//! accept loop and connection handler differ.
 
 use std::path::{Path, PathBuf};
 
@@ -28,11 +36,10 @@ pub enum IpcError {
 
 /// Run the IPC server until `cancel` is signalled.
 ///
-/// On Unix: binds a `UnixListener` at `socket_path`, accepts connections,
-/// dispatches JSON-RPC requests against `ctx`.
-///
-/// On Windows: logs that IPC is unavailable and returns immediately. The
-/// named-pipe implementation lands in a follow-up commit.
+/// Dispatches to the platform-specific impl: UDS on Unix, named pipe
+/// on Windows. The `socket_path` value comes from
+/// [`crate::config::Config::ipc_socket_path`] — its meaning is the file
+/// path on Unix and the pipe name on Windows.
 pub async fn serve(
     socket_path: PathBuf,
     ctx: Context,
@@ -42,10 +49,14 @@ pub async fn serve(
     {
         serve_unix(socket_path, ctx, cancel).await
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        serve_windows(socket_path, ctx, cancel).await
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (socket_path, ctx, cancel);
-        warn!("IPC server is not yet implemented on this platform");
+        warn!("IPC server is not implemented on this platform");
         Ok(())
     }
 }
@@ -171,8 +182,36 @@ async fn handle_unix_connection(
     }
 }
 
+/// Connect to the running daemon's IPC endpoint, send one JSON-RPC
+/// request, read one response, return it. Picks the transport at
+/// compile time to match [`serve`]:
+/// - Unix: UDS at the given file-system path.
+/// - Windows: named pipe whose full name is the OS-string view of `path`.
+pub async fn call_local(
+    path: &Path,
+    request: &super::wire::JsonRpcRequest,
+) -> Result<super::wire::JsonRpcResponse, super::wire::FrameError> {
+    #[cfg(unix)]
+    {
+        call_unix(path, request).await
+    }
+    #[cfg(windows)]
+    {
+        call_windows(path, request).await
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, request);
+        Err(super::wire::FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "IPC client is not implemented on this platform",
+        )))
+    }
+}
+
 /// Connect to the IPC socket, send one JSON-RPC request, read one
-/// response, and return it. Convenience for the CLI side.
+/// response, and return it. Unix-only sibling of [`call_local`]; most
+/// callers want [`call_local`] for portability.
 #[cfg(unix)]
 pub async fn call_unix(
     socket_path: &Path,
@@ -187,6 +226,121 @@ pub async fn call_unix(
         .map_err(super::wire::FrameError::Io)?;
     write_frame(&mut stream, request).await?;
     read_frame(&mut stream).await
+}
+
+// ---------------------------------------------------------------------
+// Windows named-pipe transport
+// ---------------------------------------------------------------------
+
+/// Pipe name used by both server and client. `Path` carries the same
+/// OS-string the daemon's `Config::ipc_socket_path()` returns —
+/// `\\.\pipe\mcp-bridge-control` by default.
+#[cfg(windows)]
+async fn serve_windows(
+    pipe_path: PathBuf,
+    ctx: Context,
+    cancel: CancellationToken,
+) -> Result<(), IpcError> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let pipe_name = pipe_path.as_os_str();
+
+    // First instance: created with `first_pipe_instance(true)` so a
+    // second daemon trying to bind the same pipe gets a clean ERROR
+    // instead of silently sharing the namespace.
+    let mut server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(pipe_name)
+        .map_err(|e| IpcError::Bind {
+            path: pipe_path.clone(),
+            source: e,
+        })?;
+
+    info!(pipe = ?pipe_path, "IPC named-pipe server bound");
+
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                info!("IPC server shutting down");
+                return Ok(());
+            }
+            res = server.connect() => {
+                if let Err(e) = res {
+                    error!(error = ?e, "named-pipe connect failed");
+                    return Err(IpcError::Accept(e));
+                }
+
+                // Hand the connected pipe instance off to a task and
+                // immediately create a new instance for the next caller.
+                let connected = server;
+                server = ServerOptions::new()
+                    .create(pipe_name)
+                    .map_err(|e| IpcError::Bind {
+                        path: pipe_path.clone(),
+                        source: e,
+                    })?;
+
+                let ctx = ctx.clone();
+                let cancel = cancel.clone();
+                tokio::spawn(async move {
+                    handle_windows_connection(connected, ctx, cancel).await;
+                });
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn handle_windows_connection(
+    mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+    ctx: Context,
+    cancel: CancellationToken,
+) {
+    use super::wire::{FrameError, JsonRpcRequest, read_frame, write_frame};
+
+    let (reader, writer) = tokio::io::split(&mut pipe);
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut writer = tokio::io::BufWriter::new(writer);
+
+    loop {
+        let req: JsonRpcRequest = tokio::select! {
+            () = cancel.cancelled() => return,
+            r = read_frame(&mut reader) => match r {
+                Ok(req) => req,
+                Err(FrameError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    debug!("IPC client disconnected");
+                    return;
+                }
+                Err(e) => {
+                    warn!(error = ?e, "IPC framing error; closing connection");
+                    return;
+                }
+            },
+        };
+
+        let resp = dispatch(req, &ctx).await;
+
+        if let Err(e) = write_frame(&mut writer, &resp).await {
+            warn!(error = ?e, "IPC write failed; closing connection");
+            return;
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn call_windows(
+    pipe_path: &Path,
+    request: &super::wire::JsonRpcRequest,
+) -> Result<super::wire::JsonRpcResponse, super::wire::FrameError> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    use super::wire::{read_frame, write_frame};
+
+    let mut pipe = ClientOptions::new()
+        .open(pipe_path.as_os_str())
+        .map_err(super::wire::FrameError::Io)?;
+    write_frame(&mut pipe, request).await?;
+    read_frame(&mut pipe).await
 }
 
 #[cfg(test)]

@@ -15,5 +15,5 @@ pub mod wire;
 pub use methods::{Context, DaemonStatus, ServerListEntry, dispatch, method_names};
 #[cfg(unix)]
 pub use server::call_unix;
-pub use server::{IpcError, serve};
+pub use server::{IpcError, call_local, serve};
 pub use wire::{FrameError, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_LEN};

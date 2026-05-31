@@ -67,11 +67,24 @@ impl Config {
         self.data_dir.join("registry.json")
     }
 
-    /// Path to the IPC control socket. UDS on Unix; Windows named-pipe
-    /// support lands in a later commit.
+    /// Endpoint identifier for the IPC server.
+    ///
+    /// On Unix: a UDS path under `data_dir` (`control.sock`). On Windows:
+    /// a fixed named-pipe name (`\\.\pipe\mcp-bridge-control`) — Windows
+    /// named pipes are a flat per-machine namespace, so the data dir
+    /// doesn't participate. The single-user threat model in
+    /// [`docs/THREAT-MODEL.md`](../../../docs/THREAT-MODEL.md) makes this
+    /// safe; co-installed daemons aren't supported.
     #[must_use]
     pub fn ipc_socket_path(&self) -> PathBuf {
-        self.data_dir.join("control.sock")
+        #[cfg(unix)]
+        {
+            self.data_dir.join("control.sock")
+        }
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"\\.\pipe\mcp-bridge-control")
+        }
     }
 
     /// Override the bind address (used by CLI `--bind` flag).
