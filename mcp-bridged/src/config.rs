@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use thiserror::Error;
 
+use crate::identity::DisplayName;
+
 /// Qualifier for `directories::ProjectDirs`. Matches the bundle ID
 /// convention `dev.mcpbridge.mcp-bridged`.
 const QUALIFIER: &str = "dev";
@@ -41,6 +43,10 @@ pub struct Config {
     pub loopback_addr: SocketAddr,
     /// OS-appropriate data directory for persistent state (registry, …).
     pub data_dir: PathBuf,
+    /// Operator-facing name carried in every pairing invite. Shown on
+    /// the phone's confirm screen so the user can sanity-check they're
+    /// pairing with the right desktop.
+    pub display_name: DisplayName,
 }
 
 impl Config {
@@ -53,11 +59,20 @@ impl Config {
             .ok_or(ConfigError::NoProjectDirs)?;
         let (octets, port) = DEFAULT_BIND_ADDR;
         let (lb_octets, lb_port) = DEFAULT_LOOPBACK_ADDR;
+        let display_name = default_display_name();
         Ok(Self {
             bind_addr: SocketAddr::from((octets, port)),
             loopback_addr: SocketAddr::from((lb_octets, lb_port)),
             data_dir: dirs.data_dir().to_path_buf(),
+            display_name,
         })
+    }
+
+    /// Override the Resolver's display name (used by CLI flag).
+    #[must_use]
+    pub fn with_display_name(mut self, name: DisplayName) -> Self {
+        self.display_name = name;
+        self
     }
 
     /// Path to the persisted Server Registry. See
@@ -109,6 +124,25 @@ impl Config {
         self.data_dir = dir.as_ref().to_path_buf();
         self
     }
+}
+
+/// Resolver display name shown to phones during pairing. Picked up from
+/// the `MCP_BRIDGE_DISPLAY_NAME` env var if set; otherwise falls back
+/// to the system hostname (`HOSTNAME`/`COMPUTERNAME`) or, ultimately,
+/// the fixed string "MCP Bridge".
+fn default_display_name() -> DisplayName {
+    if let Ok(custom) = std::env::var("MCP_BRIDGE_DISPLAY_NAME") {
+        if let Ok(name) = DisplayName::new(&custom) {
+            return name;
+        }
+    }
+    let host_var = if cfg!(windows) { "COMPUTERNAME" } else { "HOSTNAME" };
+    if let Ok(host) = std::env::var(host_var) {
+        if let Ok(name) = DisplayName::new(&host) {
+            return name;
+        }
+    }
+    DisplayName::new("MCP Bridge").expect("static literal fits DisplayName")
 }
 
 /// Failure modes for [`Config::defaults`].

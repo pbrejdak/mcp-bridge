@@ -351,15 +351,22 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::*;
+    use crate::identity::{DisplayName, Keypair};
     use crate::ipc::methods::method_names;
     use crate::ipc::wire::JsonRpcRequest;
+    use crate::pair::invite_register::InviteRegister;
     use crate::registry::Registry;
 
     fn make_ctx() -> Context {
+        let cancel = CancellationToken::new();
+        let invites = InviteRegister::spawn(cancel);
         Context {
             start: Instant::now(),
             registry: Arc::new(RwLock::new(Registry::new())),
-            pair_endpoint_addr: "127.0.0.1:8765".parse().unwrap(),
+            pair_endpoint_addr: "10.0.0.5:8765".parse().unwrap(),
+            resolver_pubkey: *Keypair::generate().pubkey(),
+            display_name: DisplayName::new("Test Bridge").unwrap(),
+            invites,
         }
     }
 
@@ -389,7 +396,7 @@ mod tests {
         let resp = call_unix(&socket, &req).await.unwrap();
         assert_eq!(resp.id, serde_json::json!("client-1"));
         let result = resp.result.expect("daemon.status returns a result");
-        assert_eq!(result["pair_endpoint"], "127.0.0.1:8765");
+        assert_eq!(result["pair_endpoint"], "10.0.0.5:8765");
         assert_eq!(result["pin_count"], 0);
 
         cancel.cancel();

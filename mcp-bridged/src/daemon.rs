@@ -70,6 +70,8 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
 
     let adapters: Arc<Vec<Arc<dyn Adapter>>> = Arc::new(vec![Arc::new(ClaudeDesktopAdapter::new())]);
 
+    let resolver_pubkey = *resolver.pubkey();
+    let invites_for_ipc = invites.clone();
     let endpoint = PairEndpoint {
         bind_addr: config.bind_addr,
         cert,
@@ -91,6 +93,9 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         start: Instant::now(),
         registry: registry.clone(),
         pair_endpoint_addr: bound.local_addr,
+        resolver_pubkey,
+        display_name: config.display_name.clone(),
+        invites: invites_for_ipc,
     };
     let ipc_socket_path = config.ipc_socket_path();
     let ipc_cancel = cancel.clone();

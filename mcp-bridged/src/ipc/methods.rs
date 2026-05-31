@@ -8,10 +8,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::identity::{DisplayName, Ed25519Pubkey};
+use crate::pair::invite::Invite;
+use crate::pair::invite_register::InviteRegister;
+use crate::pair::lan_addr::LanAddr;
 use crate::pair::logical_id::LogicalId;
+use crate::pair::nonce::Nonce;
 use crate::registry::{PinState, Registry};
 
 use super::wire::{JsonRpcRequest, JsonRpcResponse};
@@ -20,6 +27,7 @@ use super::wire::{JsonRpcRequest, JsonRpcResponse};
 pub mod method_names {
     pub const DAEMON_STATUS: &str = "daemon.status";
     pub const SERVERS_LIST: &str = "servers.list";
+    pub const PAIR_INVITE_START: &str = "pair.invite_start";
 }
 
 /// JSON-RPC error codes per [JSON-RPC 2.0 §5.1](https://www.jsonrpc.org/specification#error_object).
@@ -43,8 +51,17 @@ pub struct Context {
     pub start: Instant,
     /// Shared pin registry; read for `pin_count`.
     pub registry: Arc<RwLock<Registry>>,
-    /// The pair endpoint's actual bound socket address.
+    /// The pair endpoint's actual bound socket address. Used both for
+    /// status reporting and for constructing the LAN URL inside fresh
+    /// pair invites.
     pub pair_endpoint_addr: SocketAddr,
+    /// Resolver Ed25519 pubkey carried in every invite.
+    pub resolver_pubkey: Ed25519Pubkey,
+    /// Operator-facing name shown on the phone's confirm screen.
+    pub display_name: DisplayName,
+    /// Invite register; `pair.invite_start` writes to it, the HTTP
+    /// pair endpoint consumes from it.
+    pub invites: InviteRegister,
 }
 
 /// Result body of [`method_names::DAEMON_STATUS`].
@@ -111,6 +128,17 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                 ),
             }
         }
+        method_names::PAIR_INVITE_START => match build_invite(ctx).await {
+            Ok(invite) => match serde_json::to_value(&invite) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize invite: {e}"),
+                ),
+            },
+            Err(e) => JsonRpcResponse::error(id, error_codes::INTERNAL_ERROR, e),
+        },
         unknown => JsonRpcResponse::error(
             id,
             error_codes::METHOD_NOT_FOUND,
@@ -127,6 +155,32 @@ async fn build_daemon_status(ctx: &Context) -> DaemonStatus {
         pin_count,
         pair_endpoint: ctx.pair_endpoint_addr.to_string(),
     }
+}
+
+/// Build a fresh Direction-B pairing invite (random nonce, current
+/// Resolver pubkey and display name, LAN URL derived from the pair
+/// endpoint's bound address) and register it with the invite actor.
+async fn build_invite(ctx: &Context) -> Result<Invite, String> {
+    let mut nonce_bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_bytes(nonce_bytes);
+
+    let lan = format!("https://{}/pair", ctx.pair_endpoint_addr);
+    let lan_addr = LanAddr::new(&lan).map_err(|e| format!("could not build LAN URL: {e}"))?;
+
+    let invite = Invite::new(
+        ctx.resolver_pubkey,
+        ctx.display_name.clone(),
+        lan_addr,
+        nonce,
+    );
+
+    ctx.invites
+        .register(invite.clone())
+        .await
+        .map_err(|e| format!("could not register invite: {e}"))?;
+
+    Ok(invite)
 }
 
 async fn build_servers_list(ctx: &Context) -> Vec<ServerListEntry> {
@@ -166,10 +220,18 @@ mod tests {
     use crate::registry::ServerPin;
 
     fn make_ctx() -> Context {
+        // Spawn an invite-register actor with a never-fired cancel
+        // token. Tests that call `pair.invite_start` will register
+        // invites against it; nothing else touches it.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let invites = InviteRegister::spawn(cancel);
         Context {
             start: Instant::now(),
             registry: Arc::new(RwLock::new(Registry::new())),
-            pair_endpoint_addr: "127.0.0.1:8765".parse().unwrap(),
+            pair_endpoint_addr: "10.0.0.5:8765".parse().unwrap(),
+            resolver_pubkey: *Keypair::generate().pubkey(),
+            display_name: DisplayName::new("Test Bridge").unwrap(),
+            invites,
         }
     }
 
@@ -214,7 +276,7 @@ mod tests {
         };
         let resp = dispatch(req, &ctx).await;
         let result = resp.result.expect("success response carries result");
-        assert_eq!(result["pair_endpoint"], "127.0.0.1:8765");
+        assert_eq!(result["pair_endpoint"], "10.0.0.5:8765");
         assert_eq!(result["pin_count"], 0);
         assert_eq!(result["version"], env!("CARGO_PKG_VERSION"));
         assert!(result["uptime_seconds"].is_u64());
@@ -293,6 +355,66 @@ mod tests {
         }
         // Pin state is serialised as the variant name.
         assert_eq!(first["state"], "Reachable");
+    }
+
+    #[tokio::test]
+    async fn pair_invite_start_returns_a_registered_invite() {
+        let ctx = make_ctx();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: serde_json::json!(7),
+            method: method_names::PAIR_INVITE_START.to_owned(),
+            params: None,
+        };
+        let resp = dispatch(req, &ctx).await;
+        let result = resp.result.expect("success response carries result");
+
+        // Shape matches the SPEC §4.2 invite JSON.
+        assert_eq!(result["spec"], "mcp-pair/v0.1");
+        assert_eq!(result["direction"], "resolver_offered");
+        assert_eq!(result["resolver"]["display_name"], "Test Bridge");
+        assert_eq!(result["resolver"]["lan_addr"], "https://10.0.0.5:8765/pair");
+        assert!(result["resolver"]["sas"].as_str().is_some());
+        assert!(result["nonce"].as_str().is_some());
+
+        // The invite landed in the register — a phone showing up with
+        // this nonce inside the lifetime window will be accepted.
+        let invite: Invite = serde_json::from_value(result).unwrap();
+        let consumed = ctx.invites.consume(invite.nonce).await;
+        assert!(consumed.is_ok(), "invite must be in the register");
+    }
+
+    #[tokio::test]
+    async fn back_to_back_invites_use_different_nonces() {
+        let ctx = make_ctx();
+        let one = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::PAIR_INVITE_START.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await
+        .result
+        .unwrap();
+        let two = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(2),
+                method: method_names::PAIR_INVITE_START.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await
+        .result
+        .unwrap();
+        assert_ne!(
+            one["nonce"], two["nonce"],
+            "fresh invites must carry distinct nonces"
+        );
     }
 
     #[tokio::test]
