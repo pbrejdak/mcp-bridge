@@ -31,6 +31,7 @@ pub mod method_names {
     pub const DAEMON_STATUS: &str = "daemon.status";
     pub const SERVERS_LIST: &str = "servers.list";
     pub const PAIR_INVITE_START: &str = "pair.invite_start";
+    pub const PAIR_INVITE_CANCEL: &str = "pair.invite_cancel";
     pub const SERVERS_REVOKE: &str = "servers.revoke";
 }
 
@@ -85,6 +86,14 @@ pub struct DaemonStatus {
     pub uptime_seconds: u64,
     pub pin_count: usize,
     pub pair_endpoint: String,
+}
+
+/// Request body for [`method_names::PAIR_INVITE_CANCEL`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairInviteCancelParams {
+    /// Nonce of the invite to drop. The hyphenated base64url form
+    /// returned by `pair.invite_start`.
+    pub nonce: Nonce,
 }
 
 /// Request body for [`method_names::SERVERS_REVOKE`].
@@ -157,6 +166,25 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     format!("could not serialize servers list: {e}"),
                 ),
             }
+        }
+        method_names::PAIR_INVITE_CANCEL => {
+            let params: PairInviteCancelParams = match req
+                .params
+                .as_ref()
+                .ok_or_else(|| "missing `params` (expected { nonce })".to_owned())
+                .and_then(|v| serde_json::from_value(v.clone()).map_err(|e| format!("{e}")))
+            {
+                Ok(p) => p,
+                Err(msg) => {
+                    return JsonRpcResponse::error(id, error_codes::INVALID_PARAMS, msg);
+                }
+            };
+            // Consume drains the invite from the active register. The
+            // contract is idempotent — already-consumed and never-seen
+            // both mean "there's no live invite to cancel", which is
+            // the success state from the caller's perspective.
+            let _ = ctx.invites.consume(params.nonce).await;
+            JsonRpcResponse::success(id, serde_json::json!({}))
         }
         method_names::PAIR_INVITE_START => match build_invite(ctx).await {
             Ok(invite) => match serde_json::to_value(&invite) {
@@ -557,6 +585,77 @@ mod tests {
             one["nonce"], two["nonce"],
             "fresh invites must carry distinct nonces"
         );
+    }
+
+    #[tokio::test]
+    async fn pair_invite_cancel_removes_a_live_invite() {
+        let ctx = make_ctx();
+        let started = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::PAIR_INVITE_START.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await
+        .result
+        .unwrap();
+        let invite: Invite = serde_json::from_value(started).unwrap();
+
+        let cancel = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(2),
+                method: method_names::PAIR_INVITE_CANCEL.to_owned(),
+                params: Some(serde_json::json!({ "nonce": invite.nonce })),
+            },
+            &ctx,
+        )
+        .await;
+        assert!(cancel.result.is_some());
+        assert!(cancel.error.is_none());
+
+        // A phone showing up with the canceled nonce now fails — the
+        // register has moved it to the consumed table.
+        let attempted = ctx.invites.consume(invite.nonce).await;
+        assert!(attempted.is_err(), "canceled invite must not be consumable");
+    }
+
+    #[tokio::test]
+    async fn pair_invite_cancel_is_idempotent_for_unknown_nonces() {
+        let ctx = make_ctx();
+        let made_up = Nonce::from_bytes([0xAA; 16]);
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(3),
+                method: method_names::PAIR_INVITE_CANCEL.to_owned(),
+                params: Some(serde_json::json!({ "nonce": made_up })),
+            },
+            &ctx,
+        )
+        .await;
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn pair_invite_cancel_rejects_missing_params() {
+        let ctx = make_ctx();
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(4),
+                method: method_names::PAIR_INVITE_CANCEL.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let err = resp.error.expect("missing params must be an error");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS);
     }
 
     #[tokio::test]

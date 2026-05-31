@@ -288,15 +288,25 @@ async fn run_pair(json_output: bool) -> Result<()> {
     }
 
     // Poll until either (a) a new pin appears with a LID we didn't see
-    // before — that's the just-paired phone — or (b) the invite
-    // lifetime expires. The InviteRegister cleans the nonce on its own.
+    // before — that's the just-paired phone — (b) the invite lifetime
+    // expires, or (c) the user hits Ctrl-C. The ctrl_c arm sends a
+    // pair.invite_cancel so the nonce is released immediately instead
+    // of sitting in the register for the rest of its lifetime.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(65);
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => {
+                cancel_invite(&socket, invite.nonce).await;
                 bail!("pair invite expired before any phone completed it");
+            }
+            ctrl = tokio::signal::ctrl_c() => {
+                if let Err(e) = ctrl {
+                    return Err(anyhow!("failed to install Ctrl-C handler: {e}"));
+                }
+                cancel_invite(&socket, invite.nonce).await;
+                bail!("pair aborted by user (Ctrl-C)");
             }
             _ = interval.tick() => {}
         }
@@ -320,6 +330,21 @@ async fn run_pair(json_output: bool) -> Result<()> {
             }
             return Ok(());
         }
+    }
+}
+
+/// Best-effort `pair.invite_cancel` call. Failure to reach the daemon
+/// just means the invite will expire on its own in ≤60s, so we log
+/// and move on rather than failing the abort path.
+async fn cancel_invite(socket: &std::path::Path, nonce: mcp_bridged::pair::nonce::Nonce) {
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("cancel-1"),
+        method: ipc::method_names::PAIR_INVITE_CANCEL.to_owned(),
+        params: Some(serde_json::json!({ "nonce": nonce })),
+    };
+    if let Err(e) = ipc::call_local(socket, &request).await {
+        tracing::debug!(error = ?e, "pair.invite_cancel call failed (invite will expire on its own)");
     }
 }
 
