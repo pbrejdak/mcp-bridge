@@ -386,6 +386,7 @@ mod tests {
             registry_path,
             sentinel: Sentinel::random(),
             adapters: Arc::new(Vec::new()),
+            recorder: Some(crate::observability::EventRecorder::new()),
         }
     }
 

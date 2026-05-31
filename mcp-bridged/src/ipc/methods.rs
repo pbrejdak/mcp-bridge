@@ -17,6 +17,8 @@ use tokio::sync::RwLock;
 
 use crate::adapters::{Adapter, Sentinel};
 use crate::identity::{DisplayName, Ed25519Pubkey, Keypair, Keystore};
+use crate::observability::EventRecorder;
+use crate::observability::recorder::LogEvent;
 use crate::pair::invite::Invite;
 use crate::pair::invite_register::InviteRegister;
 use crate::pair::lan_addr::LanAddr;
@@ -36,6 +38,7 @@ pub mod method_names {
     pub const SERVERS_REVOKE: &str = "servers.revoke";
     pub const IDENTITY_SHOW: &str = "identity.show";
     pub const IDENTITY_ROTATE: &str = "identity.rotate";
+    pub const LOG_RECENT: &str = "log.recent";
 }
 
 /// JSON-RPC error codes per [JSON-RPC 2.0 §5.1](https://www.jsonrpc.org/specification#error_object).
@@ -80,6 +83,11 @@ pub struct Context {
     /// Client Adapters notified on revoke (best-effort, identical to
     /// the accept-path fan-out).
     pub adapters: Arc<Vec<Arc<dyn Adapter>>>,
+    /// In-memory recent-events buffer feeding `log.recent`. `None`
+    /// when the observability layer wasn't installed (e.g. some
+    /// integration tests skip it); the dispatcher returns an empty
+    /// list in that case.
+    pub recorder: Option<EventRecorder>,
 }
 
 /// Result body of [`method_names::IDENTITY_SHOW`].
@@ -89,6 +97,26 @@ pub struct IdentityInfo {
     pub pubkey: Ed25519Pubkey,
     /// Operator-facing display name carried in every invite.
     pub display_name: DisplayName,
+}
+
+/// Request body for [`method_names::LOG_RECENT`]. All fields optional;
+/// the dispatcher applies sensible defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogRecentParams {
+    /// Return only events with `seq > after`. Use the largest seq
+    /// from a previous call as the cursor for follow-mode polling.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub after: Option<u64>,
+    /// Cap on number of events returned (oldest-first, newest-trimmed
+    /// when over cap). Defaults to 200; capped at 1024.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub limit: Option<usize>,
+}
+
+/// Result body of [`method_names::LOG_RECENT`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRecentResult {
+    pub events: Vec<LogEvent>,
 }
 
 /// Result body of [`method_names::IDENTITY_ROTATE`].
@@ -244,6 +272,35 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     id,
                     error_codes::INTERNAL_ERROR,
                     format!("could not serialize identity: {e}"),
+                ),
+            }
+        }
+        method_names::LOG_RECENT => {
+            let params: LogRecentParams = match req.params.as_ref() {
+                Some(value) => match serde_json::from_value(value.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            error_codes::INVALID_PARAMS,
+                            format!("{e}"),
+                        );
+                    }
+                },
+                None => LogRecentParams::default(),
+            };
+            let limit = params.limit.unwrap_or(200).min(1024);
+            let events = ctx
+                .recorder
+                .as_ref()
+                .map(|r| r.recent(params.after, limit))
+                .unwrap_or_default();
+            match serde_json::to_value(&LogRecentResult { events }) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize log events: {e}"),
                 ),
             }
         }
@@ -547,6 +604,7 @@ mod tests {
             registry_path,
             sentinel: Sentinel::random(),
             adapters: Arc::new(Vec::new()),
+            recorder: Some(EventRecorder::new()),
         }
     }
 
@@ -757,6 +815,88 @@ mod tests {
         let info: IdentityInfo = serde_json::from_value(result).unwrap();
         assert_eq!(info.display_name.as_str(), "Test Bridge");
         assert_eq!(info.pubkey, ctx.resolver_pubkey);
+    }
+
+    #[tokio::test]
+    async fn log_recent_returns_recorded_events_in_seq_order() {
+        let ctx = make_ctx();
+        // Push three events into the recorder via the public push
+        // path that the Layer impl exercises.
+        let recorder = ctx.recorder.as_ref().unwrap();
+        for i in 0..3 {
+            recorder.push(LogEvent {
+                seq: 0,
+                timestamp: 100 + i,
+                level: "INFO".to_owned(),
+                target: "test".to_owned(),
+                message: format!("event {i}"),
+            });
+        }
+
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::LOG_RECENT.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        let events = result["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        let seqs: Vec<u64> = events
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn log_recent_honors_after_cursor() {
+        let ctx = make_ctx();
+        let recorder = ctx.recorder.as_ref().unwrap();
+        for i in 0..5 {
+            recorder.push(LogEvent {
+                seq: 0,
+                timestamp: i,
+                level: "INFO".to_owned(),
+                target: "t".to_owned(),
+                message: format!("e{i}"),
+            });
+        }
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(2),
+                method: method_names::LOG_RECENT.to_owned(),
+                params: Some(serde_json::json!({ "after": 2 })),
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        let events = result["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3, "must return events 3, 4, 5");
+    }
+
+    #[tokio::test]
+    async fn log_recent_when_recorder_is_absent_returns_empty_array() {
+        let mut ctx = make_ctx();
+        ctx.recorder = None;
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(3),
+                method: method_names::LOG_RECENT.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        assert!(result["events"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

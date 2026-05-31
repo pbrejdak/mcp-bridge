@@ -102,6 +102,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         registry_path: registry_path_for_ipc,
         sentinel,
         adapters: adapters_for_ipc,
+        recorder: crate::observability::recorder(),
     };
     let ipc_socket_path = config.ipc_socket_path();
     let ipc_cancel = cancel.clone();

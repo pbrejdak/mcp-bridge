@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
         Command::List => run_list(json_output).await,
         Command::Show { pin } => run_show(pin, json_output).await,
         Command::Revoke { pin, consumer } => run_revoke(pin, consumer, json_output).await,
-        Command::Logs { .. } => not_implemented("logs"),
+        Command::Logs { follow } => run_logs(follow, json_output).await,
         Command::Diagnostics => not_implemented("diagnostics"),
         Command::Update => not_implemented("update"),
         Command::Identity(IdentityCommand::Rotate { yes }) => {
@@ -206,6 +206,78 @@ async fn run_list(json_output: bool) -> Result<()> {
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
     Ok(())
+}
+
+/// `mcp-bridge logs [--follow]` — print recent daemon log entries.
+/// Without --follow: prints the last 200 lines and exits. With:
+/// polls every second using the largest seq seen so far as the
+/// cursor, printing new lines as they arrive (Ctrl-C to stop).
+async fn run_logs(follow: bool, json_output: bool) -> Result<()> {
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let initial = fetch_logs(&socket, None).await?;
+    let mut cursor = print_events(&initial.events, json_output)?;
+
+    if !follow {
+        return Ok(());
+    }
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            ctrl = tokio::signal::ctrl_c() => {
+                ctrl.map_err(|e| anyhow!("Ctrl-C handler: {e}"))?;
+                return Ok(());
+            }
+            _ = interval.tick() => {}
+        }
+        let next = fetch_logs(&socket, cursor).await?;
+        if let Some(last) = print_events(&next.events, json_output)? {
+            cursor = Some(last);
+        }
+    }
+}
+
+/// Helper for `run_logs`: one log.recent call.
+async fn fetch_logs(
+    socket: &std::path::Path,
+    after: Option<u64>,
+) -> Result<ipc::LogRecentResult> {
+    let params = serde_json::to_value(ipc::LogRecentParams { after, limit: None })?;
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("logs-1"),
+        method: ipc::method_names::LOG_RECENT.to_owned(),
+        params: Some(params),
+    };
+    let response = call_with_friendly_error(socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+    serde_json::from_value(result).context("decoding log.recent response")
+}
+
+/// Render `events` to stdout. Returns the largest seq printed, if any,
+/// so the caller can advance the polling cursor.
+fn print_events(
+    events: &[mcp_bridged::observability::recorder::LogEvent],
+    json_output: bool,
+) -> Result<Option<u64>> {
+    if json_output {
+        for e in events {
+            println!("{}", serde_json::to_string(e)?);
+        }
+    } else {
+        for e in events {
+            println!("[{:>5}] {} {} | {}", e.level, e.timestamp, e.target, e.message);
+        }
+    }
+    Ok(events.last().map(|e| e.seq))
 }
 
 /// `mcp-bridge identity rotate` — destructive. Generates a new
