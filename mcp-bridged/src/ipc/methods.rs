@@ -34,6 +34,7 @@ pub mod method_names {
     pub const PAIR_INVITE_START: &str = "pair.invite_start";
     pub const PAIR_INVITE_CANCEL: &str = "pair.invite_cancel";
     pub const SERVERS_REVOKE: &str = "servers.revoke";
+    pub const IDENTITY_SHOW: &str = "identity.show";
 }
 
 /// JSON-RPC error codes per [JSON-RPC 2.0 §5.1](https://www.jsonrpc.org/specification#error_object).
@@ -78,6 +79,15 @@ pub struct Context {
     /// Client Adapters notified on revoke (best-effort, identical to
     /// the accept-path fan-out).
     pub adapters: Arc<Vec<Arc<dyn Adapter>>>,
+}
+
+/// Result body of [`method_names::IDENTITY_SHOW`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityInfo {
+    /// Resolver Ed25519 pubkey as `ed25519:<base64url>`.
+    pub pubkey: Ed25519Pubkey,
+    /// Operator-facing display name carried in every invite.
+    pub display_name: DisplayName,
 }
 
 /// Result body of [`method_names::DAEMON_STATUS`].
@@ -202,6 +212,20 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     id,
                     error_codes::INTERNAL_ERROR,
                     format!("could not serialize pin: {e}"),
+                ),
+            }
+        }
+        method_names::IDENTITY_SHOW => {
+            let info = IdentityInfo {
+                pubkey: ctx.resolver_pubkey,
+                display_name: ctx.display_name.clone(),
+            };
+            match serde_json::to_value(&info) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize identity: {e}"),
                 ),
             }
         }
@@ -623,6 +647,33 @@ mod tests {
             one["nonce"], two["nonce"],
             "fresh invites must carry distinct nonces"
         );
+    }
+
+    #[tokio::test]
+    async fn identity_show_returns_pubkey_and_display_name() {
+        let ctx = make_ctx();
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::IDENTITY_SHOW.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        let pubkey = result["pubkey"].as_str().unwrap();
+        assert!(
+            pubkey.starts_with("ed25519:"),
+            "pubkey must be the canonical ed25519:<base64url> form, got {pubkey}",
+        );
+        assert_eq!(result["display_name"], "Test Bridge");
+
+        // Round-trips through IdentityInfo without losing data.
+        let info: IdentityInfo = serde_json::from_value(result).unwrap();
+        assert_eq!(info.display_name.as_str(), "Test Bridge");
+        assert_eq!(info.pubkey, ctx.resolver_pubkey);
     }
 
     #[tokio::test]

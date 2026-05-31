@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
         Command::Diagnostics => not_implemented("diagnostics"),
         Command::Update => not_implemented("update"),
         Command::Identity(IdentityCommand::Rotate) => not_implemented("identity rotate"),
-        Command::Identity(IdentityCommand::Show) => not_implemented("identity show"),
+        Command::Identity(IdentityCommand::Show) => run_identity_show(json_output).await,
     }
 }
 
@@ -180,6 +180,39 @@ async fn run_list(json_output: bool) -> Result<()> {
     let entries: Vec<ipc::ServerListEntry> =
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
+    Ok(())
+}
+
+/// `mcp-bridge identity show` — call identity.show and print the
+/// Resolver pubkey + display name. Useful for verifying out-of-band
+/// what the phone is about to pin to.
+async fn run_identity_show(json_output: bool) -> Result<()> {
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("identity-show-1"),
+        method: ipc::method_names::IDENTITY_SHOW.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let info: ipc::IdentityInfo =
+        serde_json::from_value(result).context("decoding identity.show response")?;
+    println!("display name  {}", info.display_name.as_str());
+    println!("pubkey        {}", info.pubkey);
     Ok(())
 }
 
