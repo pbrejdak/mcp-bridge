@@ -74,7 +74,12 @@ struct DaemonArgs {
 #[derive(Subcommand, Debug)]
 enum IdentityCommand {
     /// Rotate the Resolver keypair (invalidates every paired phone).
-    Rotate,
+    Rotate {
+        /// Skip the confirmation prompt. Required for non-interactive
+        /// use (CI, scripts).
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show the current Resolver identity (pubkey + display name).
     Show,
 }
@@ -95,7 +100,9 @@ async fn main() -> Result<()> {
         Command::Logs { .. } => not_implemented("logs"),
         Command::Diagnostics => not_implemented("diagnostics"),
         Command::Update => not_implemented("update"),
-        Command::Identity(IdentityCommand::Rotate) => not_implemented("identity rotate"),
+        Command::Identity(IdentityCommand::Rotate { yes }) => {
+            run_identity_rotate(yes, json_output).await
+        }
         Command::Identity(IdentityCommand::Show) => run_identity_show(json_output).await,
     }
 }
@@ -198,6 +205,66 @@ async fn run_list(json_output: bool) -> Result<()> {
     let entries: Vec<ipc::ServerListEntry> =
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
+    Ok(())
+}
+
+/// `mcp-bridge identity rotate` — destructive. Generates a new
+/// Resolver keypair, persists it to the keychain, and revokes every
+/// existing pin. The running daemon still uses the OLD keypair until
+/// restart, so the CLI prints a clear restart-required notice on
+/// success.
+async fn run_identity_rotate(yes: bool, json_output: bool) -> Result<()> {
+    use std::io::Write;
+
+    if !yes {
+        eprintln!(
+            "WARNING: this generates a new Resolver keypair and REVOKES every paired phone."
+        );
+        eprintln!("Each phone will need to re-pair from scratch.");
+        eprint!("Type `rotate` to confirm: ");
+        std::io::stderr().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("reading confirmation")?;
+        if answer.trim() != "rotate" {
+            bail!("rotate aborted");
+        }
+    }
+
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("rotate-1"),
+        method: ipc::method_names::IDENTITY_ROTATE.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let parsed: ipc::IdentityRotateResult =
+        serde_json::from_value(result).context("decoding identity.rotate response")?;
+    println!("Identity rotated.");
+    println!("  new pubkey       {}", parsed.new_pubkey);
+    println!("  revoked pins     {}", parsed.revoked_pins);
+    if parsed.restart_required {
+        println!();
+        println!("RESTART REQUIRED: the running daemon still uses the previous keypair.");
+        println!("Restart it (e.g. `mcp-bridge daemon --uninstall && mcp-bridge daemon --install`)");
+        println!("for the rotated identity to take effect on the wire.");
+    }
     Ok(())
 }
 

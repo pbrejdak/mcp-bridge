@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::adapters::{Adapter, Sentinel};
-use crate::identity::{DisplayName, Ed25519Pubkey, Keystore};
+use crate::identity::{DisplayName, Ed25519Pubkey, Keypair, Keystore};
 use crate::pair::invite::Invite;
 use crate::pair::invite_register::InviteRegister;
 use crate::pair::lan_addr::LanAddr;
@@ -35,6 +35,7 @@ pub mod method_names {
     pub const PAIR_INVITE_CANCEL: &str = "pair.invite_cancel";
     pub const SERVERS_REVOKE: &str = "servers.revoke";
     pub const IDENTITY_SHOW: &str = "identity.show";
+    pub const IDENTITY_ROTATE: &str = "identity.rotate";
 }
 
 /// JSON-RPC error codes per [JSON-RPC 2.0 §5.1](https://www.jsonrpc.org/specification#error_object).
@@ -88,6 +89,23 @@ pub struct IdentityInfo {
     pub pubkey: Ed25519Pubkey,
     /// Operator-facing display name carried in every invite.
     pub display_name: DisplayName,
+}
+
+/// Result body of [`method_names::IDENTITY_ROTATE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityRotateResult {
+    /// Pubkey of the freshly generated keypair (the one now persisted
+    /// in the keychain). The running daemon process still uses the
+    /// previous keypair in memory; `restart_required` is `true` until
+    /// somebody restarts it.
+    pub new_pubkey: Ed25519Pubkey,
+    /// Number of pins revoked as part of the rotation. Every paired
+    /// phone has to re-pair.
+    pub revoked_pins: usize,
+    /// Always `true` at this protocol version. In-process hot-swap is
+    /// a Phase 2 follow-up; until then the operator MUST restart the
+    /// daemon for the new identity to take effect on the wire.
+    pub restart_required: bool,
 }
 
 /// Result body of [`method_names::DAEMON_STATUS`].
@@ -229,6 +247,17 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                 ),
             }
         }
+        method_names::IDENTITY_ROTATE => match rotate_identity(ctx).await {
+            Ok(result) => match serde_json::to_value(&result) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize rotate result: {e}"),
+                ),
+            },
+            Err(e) => JsonRpcResponse::error(id, error_codes::INTERNAL_ERROR, e),
+        },
         method_names::PAIR_INVITE_CANCEL => {
             let params: PairInviteCancelParams = match req
                 .params
@@ -306,6 +335,60 @@ async fn build_daemon_status(ctx: &Context) -> DaemonStatus {
         pin_count,
         pair_endpoint: ctx.pair_endpoint_addr.to_string(),
     }
+}
+
+/// Generate a fresh Resolver keypair, persist it to the keychain
+/// (overwriting the previous entry), and revoke every existing pin
+/// (state flip + best-effort secret cleanup + adapter entry removal).
+///
+/// The running daemon keeps the OLD keypair in memory until restart —
+/// the result reports `restart_required: true` so the CLI can tell the
+/// user. In-process hot-swap of the keypair is a Phase 2 follow-up
+/// (every handler closure holds an `Arc<Keypair>` sealed to the old
+/// key, so swapping it is a real change, not a single store).
+async fn rotate_identity(ctx: &Context) -> Result<IdentityRotateResult, String> {
+    // 1. Snapshot the pin list outside the rotate path's locks so the
+    //    subsequent revoke_pin calls can each take the write lock.
+    let pin_ids: Vec<LogicalId> = {
+        let reg = ctx.registry.read().await;
+        reg.iter().map(|p| p.logical_id.clone()).collect()
+    };
+    let total = pin_ids.len();
+
+    // 2. Revoke every existing pin. Failures here log but don't abort
+    //    the rotate — the keypair swap is the load-bearing step, and
+    //    leaving stale pin entries in Reachable state would be worse
+    //    than leaving them half-cleaned.
+    let mut revoked_pins = 0;
+    for pin_id in pin_ids {
+        match revoke_pin(ctx, pin_id.clone()).await {
+            Ok(result) if result.revoked => revoked_pins += 1,
+            Ok(_) => { /* already-revoked counts as a no-op */ }
+            Err(e) => {
+                tracing::warn!(error = ?e, %pin_id, "revoke failed during identity rotate");
+            }
+        }
+    }
+    tracing::info!(
+        revoked = revoked_pins,
+        total,
+        "revoked pins as part of identity rotate"
+    );
+
+    // 3. Generate + persist the new keypair. This is the destructive
+    //    step: the keystore entry is overwritten. After this, restarts
+    //    of the daemon will pick up the new key.
+    let new_kp = Keypair::generate();
+    let new_pubkey = *new_kp.pubkey();
+    ctx.keystore
+        .save_resolver_keypair(&new_kp)
+        .map_err(|e| format!("could not save new keypair: {e}"))?;
+
+    Ok(IdentityRotateResult {
+        new_pubkey,
+        revoked_pins,
+        restart_required: true,
+    })
 }
 
 /// Failure modes from [`revoke_pin`] reused by the dispatcher arm.
@@ -674,6 +757,78 @@ mod tests {
         let info: IdentityInfo = serde_json::from_value(result).unwrap();
         assert_eq!(info.display_name.as_str(), "Test Bridge");
         assert_eq!(info.pubkey, ctx.resolver_pubkey);
+    }
+
+    #[tokio::test]
+    async fn identity_rotate_persists_a_fresh_keypair_and_revokes_pins() {
+        let ctx = make_ctx();
+        {
+            let mut reg = ctx.registry.write().await;
+            reg.insert(sample_pin("BodyLog", "bodylog-7f3a", 1_700_000_000));
+            reg.insert(sample_pin("Sensors", "sensors-9012", 1_700_000_500));
+        }
+        // The keystore needs to remember the resolver pubkey before
+        // rotate so the test can assert that the rotated value differs.
+        let before = Keypair::generate();
+        let before_pubkey = *before.pubkey();
+        ctx.keystore.save_resolver_keypair(&before).unwrap();
+
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::IDENTITY_ROTATE.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        assert_eq!(result["revoked_pins"], 2);
+        assert_eq!(result["restart_required"], true);
+
+        // Persisted keypair changed.
+        let loaded = ctx
+            .keystore
+            .load_resolver_keypair()
+            .unwrap()
+            .expect("keypair must still exist after rotate");
+        assert_ne!(
+            *loaded.pubkey(),
+            before_pubkey,
+            "rotate must overwrite the keypair in the keychain",
+        );
+
+        // Both pins are now Revoked.
+        let reg = ctx.registry.read().await;
+        for lid in ["bodylog-7f3a", "sensors-9012"] {
+            let pin = reg.get(&LogicalId::new(lid).unwrap()).unwrap();
+            assert_eq!(pin.state, PinState::Revoked, "{lid} must be revoked");
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_rotate_with_empty_registry_still_succeeds() {
+        let ctx = make_ctx();
+        let initial = Keypair::generate();
+        ctx.keystore.save_resolver_keypair(&initial).unwrap();
+
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(2),
+                method: method_names::IDENTITY_ROTATE.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        assert_eq!(result["revoked_pins"], 0);
+        assert_eq!(result["restart_required"], true);
+
+        let loaded = ctx.keystore.load_resolver_keypair().unwrap().unwrap();
+        assert_ne!(*loaded.pubkey(), *initial.pubkey());
     }
 
     #[tokio::test]
