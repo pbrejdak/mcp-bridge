@@ -14,7 +14,57 @@ they change.
 
 ### Added
 
-- Initial design and policy documentation set ([`docs/`](docs/)):
+Initial Rust daemon implementation (`mcp-bridged` crate) covering the
+Phase 1 end-to-end pair-and-proxy flow:
+
+- **Identity & TLS** — Ed25519 Resolver keypair (zeroizing, persisted in
+  the OS keychain via `keyring`), self-signed cert generation for the
+  pair endpoint, and a `PinningVerifier` for outbound HTTPS calls.
+- **`mcp-pair/v0.1` (SPEC §4)** — typed `PairPayload`, libsodium-style
+  sealed-box construction, the SAS phrase derivation, and an
+  `InviteRegister` actor enforcing the 60-second lifetime. All 10
+  acceptance rules from SPEC §4.5 enforced.
+- **HTTPS pair endpoint** — axum + axum-server + rustls. 204 on accept,
+  bare 400 on every failure (no error detail leaks to the network per
+  SPEC §5.3).
+- **Server Registry** — atomic JSON read/write under `data_dir`,
+  mode-0600 perms on Unix, single `RwLock<Registry>` shared between the
+  pair endpoint, announce handler, and proxy listener.
+- **Loopback listener** — `127.0.0.1:8766` HTTP proxy that validates
+  the Host header, parses path → logical_id, checks the per-Pin
+  loopback key in constant time, and forwards through a per-Pin
+  `OriginConnector` to the backend with the pinned bearer token.
+- **SSE streaming** — the connector returns a body stream instead of a
+  buffered Vec; tools/call responses ride end-to-end without buffering.
+- **`mcp-announce/v0.1` (SPEC §5)** — typed `AnnouncePayload`, the
+  `/announce` HTTPS endpoint, all 7 acceptance rules (sig, seq, exp,
+  fp/auth ratchets), and SPEC §5.6 pre-signature rate limits (8/s/IP +
+  1/s/LID). mDNS subscriber is deferred to a follow-up commit.
+- **Client Adapters** — `Adapter` trait + `Sentinel` per-install UUID
+  + a `ClaudeDesktopAdapter` that writes `mcpServers/<lid>` entries
+  atomically and removes only entries it owns on revoke.
+- **IPC (UDS on Unix, named-pipe on Windows)** — JSON-RPC 2.0 over a
+  length-prefixed frame protocol. Methods:
+  - `daemon.status`
+  - `servers.list`, `servers.detail`, `servers.revoke`
+  - `pair.invite_start`, `pair.invite_cancel`
+  - `identity.show`
+- **CLI surface** (`mcp-bridge`):
+  - `daemon` (long-running mode), `daemon --install` / `--uninstall`
+    (macOS launchd plist today; Linux systemd-user and Windows
+    Scheduled Task pending).
+  - `pair` — generates an invite, renders a terminal QR code, polls
+    until a phone completes the POST or Ctrl-C cancels it.
+  - `list`, `show <pin>`, `revoke <pin>`, `status`, `identity show`.
+- **Cross-platform support** — Unix UDS and Windows named-pipe IPC;
+  macOS launchd installer; verified compile against
+  `x86_64-pc-windows-gnu` via cross-check.
+- **CLAUDE.md** at `mcp-bridged/CLAUDE.md` documenting Rust + cross-
+  platform conventions for contributors and AI assistants.
+
+Existing design/policy documentation set:
+
+- Documentation set under [`docs/`](docs/):
   - [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Stable-Loopback Bridge pattern, trust model, sequence diagrams.
   - [`SPEC.md`](docs/SPEC.md) — normative wire protocol specification (`mcp-pair/v0.1`, `mcp-announce/v0.1`).
   - [`DAEMON.md`](docs/DAEMON.md) — Rust daemon internals.
