@@ -269,6 +269,7 @@ async fn run_pair(json_output: bool) -> Result<()> {
         serde_json::from_value(result.clone()).context("decoding pair.invite_start response")?;
 
     if !json_output {
+        let invite_json = serde_json::to_string(&invite)?;
         println!();
         println!("Pair this Bridge");
         println!();
@@ -276,9 +277,12 @@ async fn run_pair(json_output: bool) -> Result<()> {
         println!("  LAN address : {}", invite.resolver.lan_addr.as_str());
         println!("  SAS phrase  : {}", invite.resolver.sas.as_str());
         println!();
-        println!("On the phone, scan a QR built from this JSON (or paste it directly):");
+        println!("Scan the QR with the phone:");
         println!();
-        println!("{}", serde_json::to_string(&invite)?);
+        println!("{}", render_qr(&invite_json));
+        println!("Or paste the raw invite JSON into the phone:");
+        println!();
+        println!("{invite_json}");
         println!();
         println!("Waiting up to 60s for the phone to complete the pair (Ctrl-C to cancel)...");
     }
@@ -316,6 +320,25 @@ async fn run_pair(json_output: bool) -> Result<()> {
             }
             return Ok(());
         }
+    }
+}
+
+/// Render `payload` as a Unicode-block QR code suitable for terminal
+/// display. Uses Dense1x2 blocks (one terminal cell = two QR modules
+/// stacked) so the result fits comfortably on an 80-column screen for
+/// invites of the size we generate.
+fn render_qr(payload: &str) -> String {
+    use qrcode::QrCode;
+    use qrcode::render::unicode::Dense1x2;
+
+    match QrCode::new(payload.as_bytes()) {
+        Ok(code) => code
+            .render::<Dense1x2>()
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark)
+            .quiet_zone(true)
+            .build(),
+        Err(e) => format!("(could not render QR: {e})"),
     }
 }
 

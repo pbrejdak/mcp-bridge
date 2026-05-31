@@ -38,6 +38,7 @@ directories = "5"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 futures-core = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "crypto-rust"] }
+qrcode = { version = "0.14", default-features = false }
 rcgen = "0.13"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
