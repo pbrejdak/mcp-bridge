@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use mcp_bridged::{config::Config, daemon, ipc, observability};
+use mcp_bridged::{config::Config, daemon, install, ipc, observability};
 
 #[derive(Parser, Debug)]
 #[command(name = "mcp-bridge", version, about = "MCP Bridge daemon CLI", long_about = None)]
@@ -101,12 +101,6 @@ async fn main() -> Result<()> {
 }
 
 async fn run_daemon(args: DaemonArgs) -> Result<()> {
-    if args.install {
-        bail!("daemon --install is not implemented yet — see docs/ROADMAP.md Phase 2");
-    }
-    if args.uninstall {
-        bail!("daemon --uninstall is not implemented yet — see docs/ROADMAP.md Phase 2");
-    }
     let mut config = Config::defaults().context("resolving default config")?;
     if let Some(addr) = args.bind {
         config.bind_addr = addr;
@@ -114,6 +108,30 @@ async fn run_daemon(args: DaemonArgs) -> Result<()> {
     if let Some(dir) = args.data_dir {
         config.data_dir = dir;
     }
+
+    if args.install {
+        let report = install::install(&config).context("installing launch unit")?;
+        if report.replaced_existing {
+            println!("Replaced existing launch unit at {:?}.", report.unit_path);
+        } else {
+            println!("Installed launch unit at {:?}.", report.unit_path);
+        }
+        println!("The daemon is now scheduled to start at user login.");
+        return Ok(());
+    }
+    if args.uninstall {
+        let report = install::uninstall(&config).context("uninstalling launch unit")?;
+        if report.removed {
+            println!("Removed launch unit at {:?}.", report.unit_path);
+        } else {
+            println!(
+                "No launch unit was installed at {:?}; nothing to remove.",
+                report.unit_path
+            );
+        }
+        return Ok(());
+    }
+
     daemon::run_with_signal_handler(config)
         .await
         .context("daemon run loop")?;

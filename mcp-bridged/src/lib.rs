@@ -12,6 +12,7 @@ pub mod announce;
 pub mod config;
 pub mod daemon;
 pub mod identity;
+pub mod install;
 pub mod ipc;
 pub mod keystore;
 pub mod observability;
