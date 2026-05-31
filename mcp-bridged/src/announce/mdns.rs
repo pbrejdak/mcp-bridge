@@ -24,6 +24,8 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -32,9 +34,15 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
-use crate::identity::Ed25519Pubkey;
+use crate::identity::{Ed25519Pubkey, Keypair};
+use crate::registry::Registry;
+
+use super::accept::{apply_announce, parse_sealed_announce};
+use super::rate_limit::AnnounceRateLimiter;
 
 /// SPEC §5.2 TXT key carrying the sealed body.
 pub const BODY_KEY: &str = "body";
@@ -186,6 +194,129 @@ impl MdnsSubscriber for FakeMdnsSubscriber {
         *self.sender.lock().await = Some(tx);
         Ok(rx)
     }
+}
+
+/// Long-running task: subscribe to the [today, yesterday] service
+/// types, decode each TXT body, and feed the sealed bytes through the
+/// same accept pipeline the HTTP `/announce` endpoint uses.
+///
+/// Failures at any step (rate-limit drop, malformed TXT, broken seal,
+/// stale exp, replay seq) are logged at debug or warn and the loop
+/// continues. The only way out is via `cancel`.
+///
+/// Day-rollover (re-subscribing at UTC midnight when the service-type
+/// HMAC rotates) is a TODO; today the daemon needs a restart to roll
+/// to a new day's service type.
+pub async fn serve_mdns(
+    subscriber: Arc<dyn MdnsSubscriber>,
+    resolver: Arc<Keypair>,
+    registry: Arc<RwLock<Registry>>,
+    registry_path: PathBuf,
+    rate_limiter: Arc<AnnounceRateLimiter>,
+    cancel: CancellationToken,
+) -> Result<(), SubscribeError> {
+    let service_types = current_and_previous_service_types(resolver.pubkey()).to_vec();
+    info!(?service_types, "mDNS subscriber starting");
+    let mut rx = subscriber.subscribe(&service_types).await?;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                info!("mDNS subscriber shutting down");
+                return Ok(());
+            }
+            ann = rx.recv() => {
+                let Some(ann) = ann else {
+                    warn!("mDNS subscriber channel closed; exiting loop");
+                    return Ok(());
+                };
+                handle_announcement(
+                    ann,
+                    resolver.as_ref(),
+                    &registry,
+                    &registry_path,
+                    rate_limiter.as_ref(),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Process one [`MdnsAnnouncement`]. Mirrors the HTTP `/announce`
+/// handler's stage ordering — IP rate-limit, parse, LID rate-limit,
+/// apply, persist — and pulls the sealed bytes out of the `body=`
+/// TXT entry first.
+async fn handle_announcement(
+    ann: MdnsAnnouncement,
+    resolver: &Keypair,
+    registry: &Arc<RwLock<Registry>>,
+    registry_path: &std::path::Path,
+    rate_limiter: &AnnounceRateLimiter,
+) {
+    if !rate_limiter.check_ip(ann.source_addr) {
+        debug!(peer = %ann.source_addr, "mDNS announce rejected: per-IP rate limit");
+        return;
+    }
+
+    let sealed = match decode_txt_body(&ann.txt) {
+        Ok(b) => b,
+        Err(e) => {
+            debug!(error = ?e, instance = %ann.instance_name, "mDNS TXT decode failed");
+            return;
+        }
+    };
+
+    let payload = match parse_sealed_announce(&sealed, resolver) {
+        Ok(p) => p,
+        Err(e) => {
+            debug!(error = ?e, "mDNS announce rejected at parse");
+            return;
+        }
+    };
+
+    if !rate_limiter.check_lid(&payload.lid) {
+        debug!(logical_id = %payload.lid, "mDNS announce rejected: per-LID rate limit");
+        return;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let accepted = match apply_announce(payload, registry, now).await {
+        Ok(a) => a,
+        Err(e) => {
+            debug!(error = ?e, "mDNS announce rejected");
+            return;
+        }
+    };
+
+    let registry_guard = registry.read().await;
+    let save_result = registry_guard.save(registry_path).await;
+    drop(registry_guard);
+    if let Err(e) = save_result {
+        warn!(
+            error = ?e,
+            logical_id = %accepted.logical_id,
+            "registry save failed after mDNS announce accept",
+        );
+        return;
+    }
+
+    if accepted.auth_rotated {
+        warn!(
+            logical_id = %accepted.logical_id,
+            "mDNS announce signalled bearer-token rotation; §5.7 re-fetch is not yet implemented",
+        );
+    }
+    info!(
+        logical_id = %accepted.logical_id,
+        seq = accepted.new_seq,
+        fp_changed = accepted.fp_changed,
+        auth_rotated = accepted.auth_rotated,
+        "mDNS announce accepted",
+    );
 }
 
 /// Convert a unix-seconds timestamp to (year, month, day) in UTC.
