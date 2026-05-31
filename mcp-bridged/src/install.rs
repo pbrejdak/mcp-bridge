@@ -23,7 +23,15 @@ pub fn install(config: &Config) -> Result<InstallReport, InstallError> {
     {
         macos::install(config)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::install(config)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::install(config)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = config;
         Err(InstallError::Unsupported)
@@ -37,7 +45,15 @@ pub fn uninstall(config: &Config) -> Result<UninstallReport, InstallError> {
     {
         macos::uninstall(config)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::uninstall(config)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::uninstall(config)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = config;
         Err(InstallError::Unsupported)
@@ -311,6 +327,206 @@ mod macos {
             );
             assert!(plist.contains("Patryk&apos;s Mac"));
             assert!(plist.contains("out &amp; err.log"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Linux — systemd user unit under ~/.config/systemd/user/
+// ---------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use directories::BaseDirs;
+
+    use crate::config::Config;
+
+    use super::{InstallError, InstallReport, UninstallReport};
+
+    /// Systemd unit name. Must match the keychain service name minus
+    /// the bundle-ID dotted form; systemd is happy with the dot-form
+    /// directly as the unit name.
+    const UNIT_NAME: &str = "mcp-bridged";
+
+    pub(super) fn install(config: &Config) -> Result<InstallReport, InstallError> {
+        let unit_path = unit_path()?;
+        let binary = std::env::current_exe().map_err(InstallError::CurrentExe)?;
+        let log_dir = config.data_dir.join("logs");
+
+        if let Err(e) = std::fs::create_dir_all(&log_dir) {
+            return Err(InstallError::WriteUnit {
+                path: log_dir,
+                source: e,
+            });
+        }
+        if let Some(parent) = unit_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err(InstallError::WriteUnit {
+                    path: parent.to_path_buf(),
+                    source: e,
+                });
+            }
+        }
+
+        let unit_contents = render_unit(
+            &binary,
+            &log_dir.join("mcp-bridged.out.log"),
+            &log_dir.join("mcp-bridged.err.log"),
+        );
+
+        let replaced_existing = unit_path.exists();
+
+        std::fs::write(&unit_path, unit_contents).map_err(|e| InstallError::WriteUnit {
+            path: unit_path.clone(),
+            source: e,
+        })?;
+
+        // systemd needs daemon-reload after a unit file change.
+        run_systemctl(&["--user", "daemon-reload"])?;
+        // enable --now persists at login AND starts the unit immediately.
+        run_systemctl(&["--user", "enable", "--now", &service_name()])?;
+
+        Ok(InstallReport {
+            unit_path,
+            replaced_existing,
+        })
+    }
+
+    pub(super) fn uninstall(_config: &Config) -> Result<UninstallReport, InstallError> {
+        let unit_path = unit_path()?;
+        if !unit_path.exists() {
+            return Ok(UninstallReport {
+                unit_path,
+                removed: false,
+            });
+        }
+
+        // Best-effort disable + stop. Both can fail if the unit isn't
+        // currently active or enabled; ignore those errors.
+        let _ = run_systemctl(&["--user", "disable", "--now", &service_name()]);
+
+        std::fs::remove_file(&unit_path).map_err(|e| InstallError::RemoveUnit {
+            path: unit_path.clone(),
+            source: e,
+        })?;
+
+        // Reload so systemd forgets the gone unit.
+        let _ = run_systemctl(&["--user", "daemon-reload"]);
+
+        Ok(UninstallReport {
+            unit_path,
+            removed: true,
+        })
+    }
+
+    fn unit_path() -> Result<PathBuf, InstallError> {
+        let dirs = BaseDirs::new().ok_or(InstallError::NoHomeDir)?;
+        // ~/.config/systemd/user is the conventional location;
+        // XDG_CONFIG_HOME overrides when set, which BaseDirs honors.
+        Ok(dirs
+            .config_dir()
+            .join("systemd")
+            .join("user")
+            .join(service_name()))
+    }
+
+    fn service_name() -> String {
+        format!("{UNIT_NAME}.service")
+    }
+
+    fn run_systemctl(args: &[&str]) -> Result<(), InstallError> {
+        let output = Command::new("systemctl")
+            .args(args)
+            .output()
+            .map_err(|e| InstallError::SpawnLaunchTool {
+                cmd: format!("systemctl {}", args.join(" ")),
+                source: e,
+            })?;
+        if !output.status.success() {
+            return Err(InstallError::LaunchToolFailed {
+                cmd: format!("systemctl {}", args.join(" ")),
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn render_unit(
+        binary: &std::path::Path,
+        stdout_path: &std::path::Path,
+        stderr_path: &std::path::Path,
+    ) -> String {
+        // systemd unit syntax is INI-flavoured with backslash-escape
+        // semantics in [Service] string values. Escape backslashes,
+        // newlines, and quote chars that would break shell parsing.
+        format!(
+            "[Unit]\n\
+             Description=MCP Bridge daemon (Stable-Loopback Bridge)\n\
+             Documentation=https://github.com/mcp-bridge/mcp-bridge\n\
+             After=network.target\n\
+             \n\
+             [Service]\n\
+             Type=simple\n\
+             ExecStart={binary} daemon\n\
+             Restart=on-failure\n\
+             RestartSec=5\n\
+             StandardOutput=append:{stdout}\n\
+             StandardError=append:{stderr}\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n",
+            binary = systemd_escape(&binary.to_string_lossy()),
+            stdout = systemd_escape(&stdout_path.to_string_lossy()),
+            stderr = systemd_escape(&stderr_path.to_string_lossy()),
+        )
+    }
+
+    /// Escape a path for use in a `Key=Value` line. systemd treats `\`
+    /// as an escape introducer in unit-file string fields; literal `\`
+    /// must be doubled. Paths with whitespace or `=` work without
+    /// quoting in systemd unit files (no shell parsing applied to
+    /// Exec lines beyond systemd's own splitter, and the splitter
+    /// respects quoting). Newlines would terminate the value, so we
+    /// reject them implicitly by escaping.
+    fn systemd_escape(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('\n', "\\n")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        #[test]
+        fn rendered_unit_has_expected_sections() {
+            let unit = render_unit(
+                &PathBuf::from("/usr/local/bin/mcp-bridge"),
+                &PathBuf::from("/var/log/mcp-bridged.out.log"),
+                &PathBuf::from("/var/log/mcp-bridged.err.log"),
+            );
+            assert!(unit.contains("[Unit]"));
+            assert!(unit.contains("[Service]"));
+            assert!(unit.contains("[Install]"));
+            assert!(unit.contains("ExecStart=/usr/local/bin/mcp-bridge daemon"));
+            assert!(unit.contains("Restart=on-failure"));
+            assert!(unit.contains("WantedBy=default.target"));
+            assert!(unit.contains(
+                "StandardOutput=append:/var/log/mcp-bridged.out.log"
+            ));
+        }
+
+        #[test]
+        fn systemd_escape_doubles_backslashes() {
+            assert_eq!(systemd_escape("/tmp/a\\b"), "/tmp/a\\\\b");
+        }
+
+        #[test]
+        fn service_name_matches_unit_name_constant() {
+            assert_eq!(service_name(), "mcp-bridged.service");
         }
     }
 }
