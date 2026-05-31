@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
         Command::Revoke { pin, consumer } => run_revoke(pin, consumer, json_output).await,
         Command::Logs { follow } => run_logs(follow, json_output).await,
         Command::Diagnostics => run_diagnostics(json_output).await,
-        Command::Update => not_implemented("update"),
+        Command::Update => run_update(json_output).await,
         Command::Identity(IdentityCommand::Rotate { yes }) => {
             run_identity_rotate(yes, json_output).await
         }
@@ -205,6 +205,45 @@ async fn run_list(json_output: bool) -> Result<()> {
     let entries: Vec<ipc::ServerListEntry> =
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
+    Ok(())
+}
+
+/// `mcp-bridge update` — check whether a newer Bridge release is
+/// available. Today the daemon returns a not-implemented stub; the
+/// real manifest fetch lands when auto-update infrastructure is set
+/// up (see `docs/PRIVACY.md` for the egress posture).
+async fn run_update(json_output: bool) -> Result<()> {
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("update-1"),
+        method: ipc::method_names::UPDATE_CHECK.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let parsed: ipc::UpdateCheckResult =
+        serde_json::from_value(result).context("decoding update.check response")?;
+    println!("current  {}", parsed.current);
+    if let Some(latest) = &parsed.latest {
+        println!("latest   {latest}");
+    }
+    println!("state    {}", parsed.state);
+    println!();
+    println!("{}", parsed.message);
     Ok(())
 }
 
@@ -745,6 +784,3 @@ fn state_label(state: mcp_bridged::registry::PinState) -> &'static str {
     }
 }
 
-fn not_implemented(subcommand: &str) -> Result<()> {
-    bail!("subcommand `{subcommand}` is not implemented yet — see docs/ROADMAP.md Phase 1");
-}

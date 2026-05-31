@@ -14,7 +14,7 @@ pub mod wire;
 
 pub use methods::{
     Context, DaemonStatus, DiagnosticsBundleResult, IdentityInfo, IdentityRotateResult,
-    LogRecentParams, LogRecentResult, ServerListEntry, dispatch, method_names,
+    LogRecentParams, LogRecentResult, ServerListEntry, UpdateCheckResult, dispatch, method_names,
 };
 #[cfg(unix)]
 pub use server::call_unix;

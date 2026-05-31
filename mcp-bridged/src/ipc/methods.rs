@@ -40,6 +40,7 @@ pub mod method_names {
     pub const IDENTITY_ROTATE: &str = "identity.rotate";
     pub const LOG_RECENT: &str = "log.recent";
     pub const DIAGNOSTICS_BUNDLE: &str = "diagnostics.bundle";
+    pub const UPDATE_CHECK: &str = "update.check";
 }
 
 /// JSON-RPC error codes per [JSON-RPC 2.0 §5.1](https://www.jsonrpc.org/specification#error_object).
@@ -98,6 +99,31 @@ pub struct IdentityInfo {
     pub pubkey: Ed25519Pubkey,
     /// Operator-facing display name carried in every invite.
     pub display_name: DisplayName,
+}
+
+/// Result body of [`method_names::UPDATE_CHECK`].
+///
+/// Auto-update infrastructure is documented in
+/// [`docs/PRIVACY.md`](../../../../docs/PRIVACY.md) §"updates.mcpbridge.me"
+/// — once-a-day anonymous HTTPS GET against a signed manifest. The
+/// daemon doesn't fetch the manifest yet; this method returns a clear
+/// stub state so the CLI doesn't bail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckResult {
+    /// Version of the running daemon, from `CARGO_PKG_VERSION`.
+    pub current: String,
+    /// State of the update check.
+    ///   - `"not_implemented"` — what we return today.
+    ///   - `"up_to_date"` — once the manifest fetch lands.
+    ///   - `"available"` — once the manifest fetch lands and reports a
+    ///     newer version.
+    pub state: String,
+    /// Latest known version when `state == "up_to_date"` or `"available"`;
+    /// `None` while `state == "not_implemented"`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub latest: Option<String>,
+    /// Human-readable message for the CLI to print.
+    pub message: String,
 }
 
 /// Result body of [`method_names::DIAGNOSTICS_BUNDLE`].
@@ -286,6 +312,28 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     id,
                     error_codes::INTERNAL_ERROR,
                     format!("could not serialize identity: {e}"),
+                ),
+            }
+        }
+        method_names::UPDATE_CHECK => {
+            // Stub state. Once the manifest fetch is wired up (signed
+            // HTTPS GET to updates.mcpbridge.me, daily, anonymous —
+            // see PRIVACY.md), this arm will return `up_to_date` or
+            // `available` with a real `latest` value.
+            let result = UpdateCheckResult {
+                current: env!("CARGO_PKG_VERSION").to_owned(),
+                state: "not_implemented".to_owned(),
+                latest: None,
+                message: "Auto-update is not yet wired up. \
+                          Check https://github.com/mcp-bridge/mcp-bridge/releases manually."
+                    .to_owned(),
+            };
+            match serde_json::to_value(&result) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize update result: {e}"),
                 ),
             }
         }
@@ -921,6 +969,31 @@ mod tests {
         let info: IdentityInfo = serde_json::from_value(result).unwrap();
         assert_eq!(info.display_name.as_str(), "Test Bridge");
         assert_eq!(info.pubkey, ctx.resolver_pubkey);
+    }
+
+    #[tokio::test]
+    async fn update_check_returns_not_implemented_stub() {
+        let ctx = make_ctx();
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::UPDATE_CHECK.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        assert_eq!(result["current"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(result["state"], "not_implemented");
+        assert!(result.get("latest").is_none() || result["latest"].is_null());
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("Auto-update is not yet wired up"),
+        );
     }
 
     #[tokio::test]
