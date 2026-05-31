@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::adapters::{Adapter, ClaudeDesktopAdapter};
-use crate::announce::AnnounceRateLimiter;
+use crate::announce::{AnnounceRateLimiter, MdnsSdSubscriber, mdns};
 use crate::config::Config;
 use crate::identity::tls_cert::GenerateError as CertGenerateError;
 use crate::identity::{Keystore, KeystoreError, generate_self_signed_cert};
@@ -38,6 +38,7 @@ use crate::registry::{Registry, RegistryError};
 /// The caller is responsible for wiring `cancel` to a signal handler
 /// (see [`wait_for_shutdown_signal`]) in production. Tests pass a
 /// CancellationToken they control directly.
+#[allow(clippy::too_many_lines)] // Top-level wiring; one statement per subsystem by design.
 pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), DaemonError> {
     info!(
         bind = %config.bind_addr,
@@ -71,8 +72,10 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
     let adapters: Arc<Vec<Arc<dyn Adapter>>> = Arc::new(vec![Arc::new(ClaudeDesktopAdapter::new())]);
 
     let resolver_pubkey = *resolver.pubkey();
+    let resolver_for_mdns = resolver.clone();
     let invites_for_ipc = invites.clone();
     let registry_path_for_ipc = registry_path.clone();
+    let registry_path_for_mdns = registry_path.clone();
     let adapters_for_ipc = adapters.clone();
     let endpoint = PairEndpoint {
         bind_addr: config.bind_addr,
@@ -124,9 +127,41 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         }
     });
 
+    // mDNS subscriber. Best-effort: a sandbox / lockdown that refuses
+    // the multicast bind shouldn't take down the rest of the daemon.
+    let mdns_task = match MdnsSdSubscriber::new() {
+        Ok(subscriber) => {
+            let subscriber_arc: Arc<dyn crate::announce::MdnsSubscriber> = Arc::new(subscriber);
+            let registry_for_mdns = registry.clone();
+            let rate_limiter = Arc::new(AnnounceRateLimiter::mdns_default());
+            let mdns_cancel = cancel.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = mdns::serve_mdns(
+                    subscriber_arc,
+                    resolver_for_mdns,
+                    registry_for_mdns,
+                    registry_path_for_mdns,
+                    rate_limiter,
+                    mdns_cancel,
+                )
+                .await
+                {
+                    error!(error = ?e, "mDNS subscriber exited with error");
+                }
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "mDNS subscriber unavailable; cellular Origins will need HTTP announces only");
+            None
+        }
+    };
+
     let serve_result = bound.serve(cancel).await;
     let _ = ipc_task.await;
     let _ = loopback_task.await;
+    if let Some(task) = mdns_task {
+        let _ = task.await;
+    }
 
     info!("daemon shut down");
     serve_result.map_err(DaemonError::Serve)

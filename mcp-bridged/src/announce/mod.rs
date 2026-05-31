@@ -18,6 +18,7 @@
 
 pub mod accept;
 pub mod mdns;
+pub mod mdns_backend;
 pub mod payload;
 pub mod rate_limit;
 
@@ -25,5 +26,6 @@ pub use accept::{
     AcceptError, AcceptedAnnounce, accept_announce, apply_announce, parse_sealed_announce,
 };
 pub use mdns::{FakeMdnsSubscriber, MdnsAnnouncement, MdnsSubscriber};
+pub use mdns_backend::MdnsSdSubscriber;
 pub use payload::{AnnounceBackend, AnnouncePayload, SpecVersion, ValidationError};
 pub use rate_limit::AnnounceRateLimiter;
