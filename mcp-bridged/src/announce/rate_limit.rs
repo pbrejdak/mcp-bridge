@@ -23,6 +23,12 @@ use crate::pair::logical_id::LogicalId;
 pub const HTTP_PER_IP_BURST: u32 = 8;
 pub const HTTP_PER_IP_REFILL_PER_SEC: f64 = 8.0;
 
+/// mDNS carrier per-source-IP budget (SPEC §5.6 — tighter than HTTP
+/// because mDNS multicast invites every host on the LAN to drive the
+/// verifier).
+pub const MDNS_PER_IP_BURST: u32 = 4;
+pub const MDNS_PER_IP_REFILL_PER_SEC: f64 = 4.0;
+
 /// Per-LID budget (SPEC §5.6, same value for both carriers).
 pub const PER_LID_BURST: u32 = 1;
 pub const PER_LID_REFILL_PER_SEC: f64 = 1.0;
@@ -111,6 +117,15 @@ impl AnnounceRateLimiter {
     pub fn http_default() -> Self {
         Self {
             per_ip: KeyedRateLimiter::new(HTTP_PER_IP_BURST, HTTP_PER_IP_REFILL_PER_SEC),
+            per_lid: KeyedRateLimiter::new(PER_LID_BURST, PER_LID_REFILL_PER_SEC),
+        }
+    }
+
+    /// SPEC §5.6 mDNS row: 4/s/IP and 1/s/LID.
+    #[must_use]
+    pub fn mdns_default() -> Self {
+        Self {
+            per_ip: KeyedRateLimiter::new(MDNS_PER_IP_BURST, MDNS_PER_IP_REFILL_PER_SEC),
             per_lid: KeyedRateLimiter::new(PER_LID_BURST, PER_LID_REFILL_PER_SEC),
         }
     }

@@ -1483,6 +1483,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-core",
  "futures-util",
+ "hmac",
  "keyring",
  "qrcode",
  "rand 0.8.6",
