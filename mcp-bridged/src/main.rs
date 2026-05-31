@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         Command::Show { pin } => run_show(pin, json_output).await,
         Command::Revoke { pin, consumer } => run_revoke(pin, consumer, json_output).await,
         Command::Logs { follow } => run_logs(follow, json_output).await,
-        Command::Diagnostics => not_implemented("diagnostics"),
+        Command::Diagnostics => run_diagnostics(json_output).await,
         Command::Update => not_implemented("update"),
         Command::Identity(IdentityCommand::Rotate { yes }) => {
             run_identity_rotate(yes, json_output).await
@@ -205,6 +205,37 @@ async fn run_list(json_output: bool) -> Result<()> {
     let entries: Vec<ipc::ServerListEntry> =
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
+    Ok(())
+}
+
+/// `mcp-bridge diagnostics` — print a redacted plain-text bundle of
+/// daemon state (identity, listening addresses, pin summary, last 50
+/// log lines). Safe to paste into a bug report.
+async fn run_diagnostics(json_output: bool) -> Result<()> {
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("diagnostics-1"),
+        method: ipc::method_names::DIAGNOSTICS_BUNDLE.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        let parsed: ipc::DiagnosticsBundleResult =
+            serde_json::from_value(result).context("decoding diagnostics.bundle response")?;
+        print!("{}", parsed.bundle);
+    }
     Ok(())
 }
 

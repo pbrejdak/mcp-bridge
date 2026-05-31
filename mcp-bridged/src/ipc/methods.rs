@@ -39,6 +39,7 @@ pub mod method_names {
     pub const IDENTITY_SHOW: &str = "identity.show";
     pub const IDENTITY_ROTATE: &str = "identity.rotate";
     pub const LOG_RECENT: &str = "log.recent";
+    pub const DIAGNOSTICS_BUNDLE: &str = "diagnostics.bundle";
 }
 
 /// JSON-RPC error codes per [JSON-RPC 2.0 §5.1](https://www.jsonrpc.org/specification#error_object).
@@ -97,6 +98,19 @@ pub struct IdentityInfo {
     pub pubkey: Ed25519Pubkey,
     /// Operator-facing display name carried in every invite.
     pub display_name: DisplayName,
+}
+
+/// Result body of [`method_names::DIAGNOSTICS_BUNDLE`].
+///
+/// `bundle` is a plain-text envelope ready to paste into a bug report.
+/// It folds together identity, listening addresses, pin summary, and
+/// the last few log lines. Secrets never reach this report — the
+/// daemon's tracing posture already keeps them out of the buffer, and
+/// the registry's serialised form never carried them in the first
+/// place (per `docs/DAEMON.md` §7.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsBundleResult {
+    pub bundle: String,
 }
 
 /// Request body for [`method_names::LOG_RECENT`]. All fields optional;
@@ -275,6 +289,17 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                 ),
             }
         }
+        method_names::DIAGNOSTICS_BUNDLE => {
+            let bundle = build_diagnostics_bundle(ctx).await;
+            match serde_json::to_value(&DiagnosticsBundleResult { bundle }) {
+                Ok(value) => JsonRpcResponse::success(id, value),
+                Err(e) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!("could not serialize diagnostics bundle: {e}"),
+                ),
+            }
+        }
         method_names::LOG_RECENT => {
             let params: LogRecentParams = match req.params.as_ref() {
                 Some(value) => match serde_json::from_value(value.clone()) {
@@ -392,6 +417,87 @@ async fn build_daemon_status(ctx: &Context) -> DaemonStatus {
         pin_count,
         pair_endpoint: ctx.pair_endpoint_addr.to_string(),
     }
+}
+
+/// Assemble the plain-text diagnostics bundle. Reads only fields that
+/// are already public-by-design in other IPC methods (status, identity,
+/// servers.list, log.recent) — every value here would have been
+/// fetchable individually anyway. The bundle just bundles them.
+async fn build_diagnostics_bundle(ctx: &Context) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(2048);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let uptime = ctx.start.elapsed().as_secs();
+    let _ = writeln!(out, "# MCP Bridge diagnostics");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "[daemon]");
+    let _ = writeln!(out, "version            = {version}");
+    let _ = writeln!(out, "uptime_seconds     = {uptime}");
+    let _ = writeln!(out, "pair_endpoint      = {}", ctx.pair_endpoint_addr);
+    let _ = writeln!(out, "registry_path      = {:?}", ctx.registry_path);
+    let _ = writeln!(out, "sentinel           = {}", ctx.sentinel);
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "[identity]");
+    let _ = writeln!(out, "display_name       = {}", ctx.display_name.as_str());
+    let _ = writeln!(out, "resolver_pubkey    = {}", ctx.resolver_pubkey);
+    let _ = writeln!(out);
+
+    let pins: Vec<_> = {
+        let reg = ctx.registry.read().await;
+        reg.iter().cloned().collect()
+    };
+    let _ = writeln!(out, "[pins]  count = {}", pins.len());
+    for pin in &pins {
+        let scope: Vec<String> = pin
+            .scope
+            .iter()
+            .map(|s| format!("{s:?}").to_lowercase())
+            .collect();
+        let _ = writeln!(
+            out,
+            "  - lid={} name={:?} state={:?} backend={} scope=[{}] created_at={}",
+            pin.logical_id.as_str(),
+            pin.display_name.as_str(),
+            pin.state,
+            pin.backend_url.as_str(),
+            scope.join(", "),
+            pin.created_at,
+        );
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "[adapters]");
+    if ctx.adapters.is_empty() {
+        let _ = writeln!(out, "  (none registered)");
+    } else {
+        for adapter in ctx.adapters.iter() {
+            let _ = writeln!(out, "  - {}", adapter.name());
+        }
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "[recent_logs] (oldest first)");
+    let events = ctx
+        .recorder
+        .as_ref()
+        .map(|r| r.recent(None, 50))
+        .unwrap_or_default();
+    if events.is_empty() {
+        let _ = writeln!(out, "  (recorder unavailable or buffer empty)");
+    } else {
+        for e in &events {
+            let _ = writeln!(
+                out,
+                "  {:>5} {} {} | {}",
+                e.level, e.timestamp, e.target, e.message
+            );
+        }
+    }
+
+    out
 }
 
 /// Generate a fresh Resolver keypair, persist it to the keychain
@@ -815,6 +921,48 @@ mod tests {
         let info: IdentityInfo = serde_json::from_value(result).unwrap();
         assert_eq!(info.display_name.as_str(), "Test Bridge");
         assert_eq!(info.pubkey, ctx.resolver_pubkey);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_bundle_includes_identity_pins_and_logs() {
+        let ctx = make_ctx();
+        {
+            let mut reg = ctx.registry.write().await;
+            reg.insert(sample_pin("BodyLog", "bodylog-7f3a", 1_700_000_000));
+        }
+        ctx.recorder.as_ref().unwrap().push(LogEvent {
+            seq: 0,
+            timestamp: 1_700_000_500,
+            level: "INFO".to_owned(),
+            target: "test".to_owned(),
+            message: "diagnostic event".to_owned(),
+        });
+
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::DIAGNOSTICS_BUNDLE.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        let bundle = result["bundle"].as_str().unwrap();
+        assert!(bundle.contains("[daemon]"), "must label the daemon section");
+        assert!(bundle.contains("[identity]"));
+        assert!(bundle.contains("Test Bridge"), "display name appears");
+        assert!(bundle.contains("bodylog-7f3a"), "pin shows up under [pins]");
+        assert!(
+            bundle.contains("diagnostic event"),
+            "recent log appears in [recent_logs]",
+        );
+        // Sanity: ed25519 pubkey shape leaks through, no secret-shaped
+        // strings appear.
+        assert!(bundle.contains("ed25519:"));
+        assert!(!bundle.contains("bearer"), "no bearer token in bundle");
+        assert!(!bundle.contains("loopback_key"));
     }
 
     #[tokio::test]

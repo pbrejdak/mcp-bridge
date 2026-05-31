@@ -13,8 +13,8 @@ pub mod server;
 pub mod wire;
 
 pub use methods::{
-    Context, DaemonStatus, IdentityInfo, IdentityRotateResult, LogRecentParams, LogRecentResult,
-    ServerListEntry, dispatch, method_names,
+    Context, DaemonStatus, DiagnosticsBundleResult, IdentityInfo, IdentityRotateResult,
+    LogRecentParams, LogRecentResult, ServerListEntry, dispatch, method_names,
 };
 #[cfg(unix)]
 pub use server::call_unix;
