@@ -27,8 +27,8 @@ struct Cli {
 enum Command {
     /// Long-running daemon mode (used by launchd / systemd / Scheduled Task).
     Daemon(DaemonArgs),
-    /// Connect to the running daemon and drive a pair via the install token.
-    Pair { token: String },
+    /// Generate a pairing invite and wait for a phone to complete it.
+    Pair,
     /// List paired servers.
     List,
     /// Show details for one paired server.
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Daemon(args) => run_daemon(args).await,
         Command::Status => run_status(json_output).await,
-        Command::Pair { .. } => not_implemented("pair"),
+        Command::Pair => run_pair(json_output).await,
         Command::List => run_list(json_output).await,
         Command::Show { .. } => not_implemented("show"),
         Command::Revoke { .. } => not_implemented("revoke"),
@@ -181,6 +181,112 @@ async fn run_list(json_output: bool) -> Result<()> {
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
     Ok(())
+}
+
+/// `mcp-bridge pair` — generate an invite, print the SAS/URL the user
+/// reads to their phone, then poll the registry until the phone
+/// completes the POST (or the 60-second invite lifetime expires).
+async fn run_pair(json_output: bool) -> Result<()> {
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    use mcp_bridged::pair::Invite;
+    use mcp_bridged::pair::logical_id::LogicalId;
+
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    // Snapshot the existing pin set so we can spot the new arrival.
+    let before: HashSet<LogicalId> = list_pins(&socket).await?.into_iter().map(|e| e.pin_id).collect();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("invite-1"),
+        method: ipc::method_names::PAIR_INVITE_START.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+
+    let invite: Invite =
+        serde_json::from_value(result.clone()).context("decoding pair.invite_start response")?;
+
+    if !json_output {
+        println!();
+        println!("Pair this Bridge");
+        println!();
+        println!("  Bridge name : {}", invite.resolver.display_name.as_str());
+        println!("  LAN address : {}", invite.resolver.lan_addr.as_str());
+        println!("  SAS phrase  : {}", invite.resolver.sas.as_str());
+        println!();
+        println!("On the phone, scan a QR built from this JSON (or paste it directly):");
+        println!();
+        println!("{}", serde_json::to_string(&invite)?);
+        println!();
+        println!("Waiting up to 60s for the phone to complete the pair (Ctrl-C to cancel)...");
+    }
+
+    // Poll until either (a) a new pin appears with a LID we didn't see
+    // before — that's the just-paired phone — or (b) the invite
+    // lifetime expires. The InviteRegister cleans the nonce on its own.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(65);
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => {
+                bail!("pair invite expired before any phone completed it");
+            }
+            _ = interval.tick() => {}
+        }
+        let pins = list_pins(&socket).await?;
+        if let Some(new_pin) = pins.into_iter().find(|p| !before.contains(&p.pin_id)) {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "paired": {
+                            "pin_id": new_pin.pin_id,
+                            "name": new_pin.name,
+                            "backend_url": new_pin.backend_url,
+                        }
+                    }))?
+                );
+            } else {
+                println!();
+                println!("Paired with: {} ({})", new_pin.name, new_pin.pin_id);
+                println!("Backend URL: {}", new_pin.backend_url);
+            }
+            return Ok(());
+        }
+    }
+}
+
+/// Helper used by `run_pair`: fetch the current `servers.list` snapshot.
+async fn list_pins(socket: &std::path::Path) -> Result<Vec<ipc::ServerListEntry>> {
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("list-poll"),
+        method: ipc::method_names::SERVERS_LIST.to_owned(),
+        params: None,
+    };
+    let response = call_with_friendly_error(socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+    serde_json::from_value(result).context("decoding servers.list response")
 }
 
 /// Wrap [`ipc::call_local`] with a CLI-friendly error message when the
