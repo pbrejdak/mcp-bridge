@@ -8,7 +8,7 @@ A privacy-first universal pairing tool that connects mobile-hosted MCP servers t
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the cross-cutting design.
 
-## Quickstart (CLI, macOS)
+## Quickstart (CLI)
 
 ```sh
 # Build the daemon + CLI (a single binary named `mcp-bridge`).
@@ -30,11 +30,14 @@ cargo build --release --bin mcp-bridge
 # Revoke when done.
 ./target/release/mcp-bridge revoke <pin-id>
 
-# Tear down the launchd unit when removing.
+# Tear down the launch unit when removing.
 ./target/release/mcp-bridge daemon --uninstall
 ```
 
-Linux systemd-user and Windows Scheduled Task installers are pending; on those platforms run `mcp-bridge daemon` in the foreground for now.
+`daemon --install` registers a per-user launch unit appropriate for the
+host OS: a launchd plist on macOS, a systemd user unit on Linux, a
+Scheduled Task on Windows. The daemon starts at user login and is
+managed by the OS thereafter.
 
 ## What it does
 
