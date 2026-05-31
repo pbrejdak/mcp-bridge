@@ -351,7 +351,8 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::*;
-    use crate::identity::{DisplayName, Keypair};
+    use crate::adapters::Sentinel;
+    use crate::identity::{DisplayName, Keypair, Keystore};
     use crate::ipc::methods::method_names;
     use crate::ipc::wire::JsonRpcRequest;
     use crate::pair::invite_register::InviteRegister;
@@ -360,6 +361,16 @@ mod tests {
     fn make_ctx() -> Context {
         let cancel = CancellationToken::new();
         let invites = InviteRegister::spawn(cancel);
+        crate::identity::keystore::install_mock_backend();
+        let service = format!(
+            "ipc-srv-tests-{}-{}",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        );
+        let keystore = Arc::new(Keystore::for_service(&service).expect("keystore"));
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let registry_path = tmp.path().join("registry.json");
+        std::mem::forget(tmp);
         Context {
             start: Instant::now(),
             registry: Arc::new(RwLock::new(Registry::new())),
@@ -367,6 +378,10 @@ mod tests {
             resolver_pubkey: *Keypair::generate().pubkey(),
             display_name: DisplayName::new("Test Bridge").unwrap(),
             invites,
+            keystore,
+            registry_path,
+            sentinel: Sentinel::random(),
+            adapters: Arc::new(Vec::new()),
         }
     }
 

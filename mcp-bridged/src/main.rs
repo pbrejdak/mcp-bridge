@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         Command::Pair => run_pair(json_output).await,
         Command::List => run_list(json_output).await,
         Command::Show { .. } => not_implemented("show"),
-        Command::Revoke { .. } => not_implemented("revoke"),
+        Command::Revoke { pin, consumer } => run_revoke(pin, consumer, json_output).await,
         Command::Logs { .. } => not_implemented("logs"),
         Command::Diagnostics => not_implemented("diagnostics"),
         Command::Update => not_implemented("update"),
@@ -180,6 +180,54 @@ async fn run_list(json_output: bool) -> Result<()> {
     let entries: Vec<ipc::ServerListEntry> =
         serde_json::from_value(result).context("decoding servers.list response")?;
     render_servers_table(&entries);
+    Ok(())
+}
+
+/// `mcp-bridge revoke <pin>` — flip the pin to Revoked and tear down
+/// the per-pin secrets + adapter entries. Per-Consumer revoke
+/// (`consumer` argument) is a Phase 2 ACL feature and is rejected for
+/// now with a clear message.
+async fn run_revoke(
+    pin: String,
+    consumer: Option<String>,
+    json_output: bool,
+) -> Result<()> {
+    if consumer.is_some() {
+        bail!(
+            "per-Consumer revoke is not implemented yet — see docs/ROADMAP.md \
+             Phase 2 (per-Consumer ACLs)"
+        );
+    }
+
+    let config = Config::defaults().context("resolving default config")?;
+    let socket = config.ipc_socket_path();
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("revoke-1"),
+        method: ipc::method_names::SERVERS_REVOKE.to_owned(),
+        params: Some(serde_json::json!({ "pin_id": pin })),
+    };
+    let response = call_with_friendly_error(&socket, &request).await?;
+    if let Some(err) = response.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+    let result = response
+        .result
+        .ok_or_else(|| anyhow!("response carried neither result nor error"))?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    let revoked = result["revoked"].as_bool().unwrap_or(false);
+    let pin_id = result["pin_id"].as_str().unwrap_or(&pin);
+    if revoked {
+        println!("Revoked {pin_id}.");
+    } else {
+        println!("{pin_id} was already revoked. (no-op)");
+    }
     Ok(())
 }
 

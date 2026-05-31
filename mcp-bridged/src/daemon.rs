@@ -72,6 +72,8 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
 
     let resolver_pubkey = *resolver.pubkey();
     let invites_for_ipc = invites.clone();
+    let registry_path_for_ipc = registry_path.clone();
+    let adapters_for_ipc = adapters.clone();
     let endpoint = PairEndpoint {
         bind_addr: config.bind_addr,
         cert,
@@ -96,6 +98,10 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         resolver_pubkey,
         display_name: config.display_name.clone(),
         invites: invites_for_ipc,
+        keystore: keystore.clone(),
+        registry_path: registry_path_for_ipc,
+        sentinel,
+        adapters: adapters_for_ipc,
     };
     let ipc_socket_path = config.ipc_socket_path();
     let ipc_cancel = cancel.clone();
