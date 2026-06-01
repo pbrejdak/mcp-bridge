@@ -14,6 +14,11 @@ use std::path::PathBuf;
 use mcp_bridged::config::Config;
 use mcp_bridged::ipc;
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
+use tauri::Manager;
+use tauri::WindowEvent;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 /// Output of [`daemon_call`]. Mirrors the JSON-RPC response envelope
 /// but flattened so the renderer doesn't have to know about
@@ -87,6 +92,58 @@ fn uuid_like_id() -> String {
     format!("console-{}-{nanos}", std::process::id())
 }
 
+/// Bring the Console window to the foreground; create it visible if
+/// the user previously hid it via the close button.
+fn show_console(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("console") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// Build the system-tray icon + menu. Right-click → menu; left-click →
+/// show/focus the Console window. The "Pair new server" item emits a
+/// `tray-action` event with payload `"pair"` that the renderer
+/// listens for and switches into the pair view.
+fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let open_item = MenuItem::with_id(app, "open", "Open Console", true, None::<&str>)?;
+    let pair_item = MenuItem::with_id(app, "pair", "Pair new server", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit MCP Bridge", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_item, &pair_item, &sep, &quit_item])?;
+
+    let icon = app
+        .default_window_icon()
+        .ok_or_else(|| tauri::Error::AssetNotFound("default window icon".to_owned()))?
+        .clone();
+
+    TrayIconBuilder::new()
+        .icon(icon)
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_console(app),
+            "pair" => {
+                show_console(app);
+                let _ = app.emit("tray-action", "pair");
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_console(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         // Single-instance: second invocation hands its argv (which may
@@ -94,14 +151,27 @@ fn main() {
         // instance, which focuses the Console window and emits a
         // `deep-link://new-url` event the renderer subscribes to.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            use tauri::Manager;
-            if let Some(window) = app.get_webview_window("console") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            show_console(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            install_tray(app.handle())?;
+
+            // Keep the tray alive when the user closes the Console
+            // window — hide the window instead of letting Tauri
+            // tear it down (which on some platforms also exits the
+            // process). Left-clicking the tray icon brings it back.
+            if let Some(window) = app.get_webview_window("console") {
+                let w = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = w.hide();
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![daemon_call])
         .run(tauri::generate_context!())
         .expect("Tauri console failed to start");

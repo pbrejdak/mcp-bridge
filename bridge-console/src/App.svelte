@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 
   import HomeView from "./lib/views/HomeView.svelte";
@@ -23,7 +24,9 @@
   // accepted for future semantics (e.g. carrying an invite token) but
   // ignored today; the pair flow always starts fresh.
   onMount(() => {
-    let stop: (() => void) | undefined;
+    let stopDeepLink: (() => void) | undefined;
+    let stopTray: (() => void) | undefined;
+
     void onOpenUrl((urls) => {
       for (const url of urls) {
         if (url.toLowerCase().startsWith("mcp-bridge://pair")) {
@@ -32,9 +35,23 @@
         }
       }
     }).then((unlisten) => {
-      stop = unlisten;
+      stopDeepLink = unlisten;
     });
-    return () => stop?.();
+
+    // Tray menu "Pair new server" item emits `tray-action` with
+    // payload "pair"; switch into the pair view from anywhere.
+    void listen<string>("tray-action", (event) => {
+      if (event.payload === "pair") {
+        view = "pair";
+      }
+    }).then((unlisten) => {
+      stopTray = unlisten;
+    });
+
+    return () => {
+      stopDeepLink?.();
+      stopTray?.();
+    };
   });
 </script>
 
