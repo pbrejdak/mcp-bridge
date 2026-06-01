@@ -34,7 +34,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 constant_time_eq = "0.3"
 crypto_box = "0.9"
-directories = "5"
+directories = "6"
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 futures-core = "0.3"
 hmac = "0.12"
