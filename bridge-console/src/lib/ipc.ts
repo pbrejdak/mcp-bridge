@@ -88,6 +88,26 @@ export interface IdentityInfo {
   display_name: string;
 }
 
+/** Result body of `identity.rotate`. */
+export interface IdentityRotateResult {
+  new_pubkey: string;
+  revoked_pins: number;
+  restart_required: boolean;
+}
+
+/** Result body of `update.check`. */
+export interface UpdateCheckResult {
+  current: string;
+  state: "not_implemented" | "up_to_date" | "available";
+  latest?: string;
+  message: string;
+}
+
+/** Result body of `diagnostics.bundle`. */
+export interface DiagnosticsBundle {
+  bundle: string;
+}
+
 /** Shape returned by `pair.invite_start`. Mirrors the SPEC §4.2
  *  Invite JSON; the phone scans this (or its QR rendering). */
 export interface PairInvite {

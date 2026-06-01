@@ -24,21 +24,3 @@
 {:else if view === "pair"}
   <PairView onclose={closePair} />
 {/if}
-
-<style>
-  :global(:root) {
-    color-scheme: light dark;
-    font-family:
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      Inter,
-      system-ui,
-      sans-serif;
-  }
-  :global(body) {
-    margin: 0;
-    background: light-dark(#fafafa, #1a1a1a);
-    color: light-dark(#1a1a1a, #f0f0f0);
-  }
-</style>

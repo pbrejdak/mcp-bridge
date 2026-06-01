@@ -1,0 +1,103 @@
+/* Global stylesheet — design tokens, base elements, button variants.
+ * Component-scoped overrides live in their own .svelte files. */
+
+:root {
+  color-scheme: light dark;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Inter,
+    system-ui,
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  background: light-dark(#fafafa, #1a1a1a);
+  color: light-dark(#1a1a1a, #f0f0f0);
+}
+
+button {
+  appearance: none;
+  border: 1px solid light-dark(#d0d0d0, #444);
+  background: light-dark(#fff, #2a2a2a);
+  color: inherit;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: light-dark(#f0f0f0, #333);
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+button.primary {
+  background: #0a84ff;
+  border-color: #0066cc;
+  color: white;
+}
+button.primary:hover:not(:disabled) {
+  background: #0066cc;
+}
+button.danger {
+  color: light-dark(#a8071a, #ff7875);
+  border-color: light-dark(#ffccc7, #5a2a2a);
+}
+button.danger:hover:not(:disabled) {
+  background: light-dark(#fff1f0, #401a1a);
+}
+button.danger.primary {
+  background: light-dark(#cf1322, #a8071a);
+  border-color: light-dark(#a8071a, #7a0612);
+  color: white;
+}
+button.danger.primary:hover:not(:disabled) {
+  background: light-dark(#a8071a, #cf1322);
+}
+button.link {
+  background: transparent;
+  border: none;
+  color: light-dark(#666, #999);
+  padding: 4px 8px;
+}
+button.link:hover:not(:disabled) {
+  color: inherit;
+  background: transparent;
+  text-decoration: underline;
+}
+
+input[type="text"],
+textarea {
+  appearance: none;
+  border: 1px solid light-dark(#d0d0d0, #444);
+  background: light-dark(#fff, #1a1a1a);
+  color: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font: inherit;
+}
+input[type="text"]:focus,
+textarea:focus {
+  outline: 2px solid #0a84ff;
+  outline-offset: -1px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.muted {
+  color: light-dark(#666, #999);
+}
+.error-banner {
+  background: light-dark(#fff1f0, #401a1a);
+  border: 1px solid light-dark(#ffccc7, #602a2a);
+  color: light-dark(#a8071a, #ffa39e);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 14px;
+}
