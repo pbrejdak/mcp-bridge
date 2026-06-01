@@ -92,6 +92,39 @@ fn uuid_like_id() -> String {
     format!("console-{}-{nanos}", std::process::id())
 }
 
+/// Apply the platform-native backdrop effect to the Console window —
+/// Sidebar vibrancy on macOS, Mica on Windows 11. Errors are warned-
+/// to-log and ignored (the window still works, just without the
+/// effect — common on Linux and on older Windows builds).
+///
+/// The visual becomes visible only when the webview content has a
+/// transparent or translucent background. Today the body has a solid
+/// fill, so this call is plumbing — CSS updates to expose the
+/// effect land in a follow-up.
+fn apply_window_effects(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        use window_vibrancy::{NSVisualEffectMaterial, apply_vibrancy};
+        if let Err(e) = apply_vibrancy(window, NSVisualEffectMaterial::Sidebar, None, None) {
+            tracing::warn!(error = ?e, "could not apply macOS vibrancy");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use window_vibrancy::apply_mica;
+        if let Err(e) = apply_mica(window, None) {
+            tracing::warn!(error = ?e, "could not apply Windows Mica");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // No native backdrop effect on Linux (the Wayland/X compositor
+        // catalogue varies too much for a single API). The window is
+        // still chrome-decorated and looks fine without the effect.
+        let _ = window;
+    }
+}
+
 /// Bring the Console window to the foreground; create it visible if
 /// the user previously hid it via the close button.
 fn show_console(app: &tauri::AppHandle) {
@@ -162,6 +195,7 @@ fn main() {
             // tear it down (which on some platforms also exits the
             // process). Left-clicking the tray icon brings it back.
             if let Some(window) = app.get_webview_window("console") {
+                apply_window_effects(&window);
                 let w = window.clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
