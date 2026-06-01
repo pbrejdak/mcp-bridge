@@ -62,6 +62,19 @@ Phase 1 end-to-end pair-and-proxy flow:
 - **CLAUDE.md** at `mcp-bridged/CLAUDE.md` documenting Rust + cross-
   platform conventions for contributors and AI assistants.
 
+Phase 2 in progress (`bridge-console` crate + npm package):
+
+- **Bridge Console scaffold** — Tauri 2 + Svelte 5 + Vite + TypeScript
+  under [`bridge-console/`](bridge-console/). One Console window today,
+  showing daemon status + identity + the paired-servers table. Tray
+  icon, pair-window (QR + SAS), and activity feed are tracked for
+  follow-up commits.
+- **`daemon_call` Tauri command** wraps `mcp_bridged::ipc::call_local`
+  so the renderer talks to the same UDS / Windows named-pipe the CLI
+  uses. Renderer-side TypeScript hits it via a typed
+  `daemonCall<T>(method, params)` helper with `DaemonError` and
+  `TransportError` thrown on the two failure modes.
+
 Existing design/policy documentation set:
 
 - Documentation set under [`docs/`](docs/):

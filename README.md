@@ -4,7 +4,7 @@ A privacy-first universal pairing tool that connects mobile-hosted MCP servers t
 
 ## Status
 
-**Pre-release.** Phase 1 of [docs/ROADMAP.md](docs/ROADMAP.md) is implemented: the `mcp-bridged` Rust daemon ships a working pair endpoint, announce endpoint, loopback proxy with SSE streaming, OS keychain-backed identity, a JSON-RPC IPC surface (Unix-domain socket on Unix, named pipe on Windows), and a `mcp-bridge` CLI for the day-to-day flow. The Bridge Console (Tauri + Svelte) and the mobile SDKs are still on paper — Phase 2 / 3 of the roadmap. Treat the wire protocol as not yet frozen until v0.1.0 ships.
+**Pre-release.** Phase 1 of [docs/ROADMAP.md](docs/ROADMAP.md) is implemented: the `mcp-bridged` Rust daemon ships a working pair endpoint, mDNS + HTTP announce, loopback proxy with SSE streaming, OS keychain-backed identity, a JSON-RPC IPC surface (Unix-domain socket on Unix, named pipe on Windows), and a `mcp-bridge` CLI for the day-to-day flow. Phase 2 has started — the [`bridge-console/`](bridge-console/) Tauri 2 + Svelte 5 desktop GUI is scaffolded with a working Console window; tray + pair-flow windows are still on paper. Mobile SDKs are Phase 3. Treat the wire protocol as not yet frozen until v0.1.0 ships.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the cross-cutting design.
 
