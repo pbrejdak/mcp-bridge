@@ -19,6 +19,11 @@
   let error = $state<string | null>(null);
   let loading = $state(true);
 
+  // Revoke confirmation state
+  let revokeTarget = $state<ServerListEntry | null>(null);
+  let revokeBusy = $state(false);
+  let revokeError = $state<string | null>(null);
+
   async function refresh() {
     loading = true;
     error = null;
@@ -46,6 +51,31 @@
   $effect(() => {
     void refresh();
   });
+
+  function openRevoke(s: ServerListEntry) {
+    revokeTarget = s;
+    revokeError = null;
+  }
+
+  function closeRevoke() {
+    revokeTarget = null;
+    revokeBusy = false;
+    revokeError = null;
+  }
+
+  async function confirmRevoke() {
+    if (!revokeTarget) return;
+    revokeBusy = true;
+    revokeError = null;
+    try {
+      await daemonCall(Method.ServersRevoke, { pin_id: revokeTarget.pin_id });
+      closeRevoke();
+      await refresh();
+    } catch (e) {
+      revokeError = e instanceof Error ? e.message : String(e);
+      revokeBusy = false;
+    }
+  }
 
   function fmtUptime(secs: number): string {
     if (secs < 60) return `${secs}s`;
@@ -116,6 +146,7 @@
             <th>Pin&nbsp;ID</th>
             <th>State</th>
             <th>Backend</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -125,6 +156,17 @@
               <td class="mono">{s.pin_id}</td>
               <td class="state state-{fmtState(s.state)}">{fmtState(s.state)}</td>
               <td class="mono">{s.backend_url}</td>
+              <td class="row-actions">
+                {#if s.state !== "Revoked"}
+                  <button
+                    class="danger"
+                    aria-label="Revoke {s.name}"
+                    onclick={() => openRevoke(s)}
+                  >
+                    Revoke
+                  </button>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -132,6 +174,47 @@
     {/if}
   </section>
 </main>
+
+{#if revokeTarget}
+  <div
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="revoke-title"
+    onclick={closeRevoke}
+    onkeydown={(e) => e.key === "Escape" && closeRevoke()}
+    tabindex="-1"
+  >
+    <!-- Click inside the modal must not dismiss it; click on the backdrop must. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="modal"
+      role="document"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+    >
+      <h2 id="revoke-title">Revoke {revokeTarget.name}?</h2>
+      <p class="muted">
+        The phone behind <span class="mono">{revokeTarget.pin_id}</span> will
+        stop reaching this Bridge. The per-pin secrets are deleted from the
+        keychain, and the Claude Desktop entry (and any other adapter entries
+        carrying our sentinel) is removed.
+      </p>
+      <p class="muted">
+        This is reversible only by re-pairing the phone.
+      </p>
+      {#if revokeError}
+        <div class="error">Revoke failed: {revokeError}</div>
+      {/if}
+      <div class="modal-actions">
+        <button onclick={closeRevoke} disabled={revokeBusy}>Cancel</button>
+        <button class="danger primary" onclick={confirmRevoke} disabled={revokeBusy}>
+          {revokeBusy ? "Revoking…" : "Revoke"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   main {
@@ -272,5 +355,66 @@
     text-align: center;
     color: light-dark(#666, #999);
     font-size: 14px;
+  }
+  .row-actions {
+    text-align: right;
+    width: 1%;
+    white-space: nowrap;
+  }
+  .row-actions button {
+    font-size: 12px;
+    padding: 4px 10px;
+  }
+  button.danger {
+    color: light-dark(#a8071a, #ff7875);
+    border-color: light-dark(#ffccc7, #5a2a2a);
+  }
+  button.danger:hover:not(:disabled) {
+    background: light-dark(#fff1f0, #401a1a);
+  }
+  button.danger.primary {
+    background: light-dark(#cf1322, #a8071a);
+    border-color: light-dark(#a8071a, #7a0612);
+    color: white;
+  }
+  button.danger.primary:hover:not(:disabled) {
+    background: light-dark(#a8071a, #cf1322);
+  }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    z-index: 100;
+  }
+  .modal {
+    background: light-dark(#fff, #2a2a2a);
+    border: 1px solid light-dark(#e0e0e0, #444);
+    border-radius: 10px;
+    padding: 24px;
+    max-width: 460px;
+    width: 100%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  }
+  .modal h2 {
+    margin: 0 0 12px 0;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .modal p {
+    margin: 0 0 12px 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 20px;
+  }
+  .muted {
+    color: light-dark(#555, #ccc);
   }
 </style>
