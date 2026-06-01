@@ -89,6 +89,19 @@ fn uuid_like_id() -> String {
 
 fn main() {
     tauri::Builder::default()
+        // Single-instance: second invocation hands its argv (which may
+        // include an mcp-bridge:// deep-link URL) to the existing
+        // instance, which focuses the Console window and emits a
+        // `deep-link://new-url` event the renderer subscribes to.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("console") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![daemon_call])
         .run(tauri::generate_context!())
         .expect("Tauri console failed to start");

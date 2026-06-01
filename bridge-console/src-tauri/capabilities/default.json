@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for the Console window. Tauri 2 requires per-plugin allowlists; this enumerates everything the renderer is allowed to invoke.",
+  "windows": ["console"],
+  "permissions": [
+    "core:default",
+    "deep-link:default"
+  ]
+}
