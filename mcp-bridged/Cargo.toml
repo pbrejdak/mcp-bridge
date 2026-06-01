@@ -41,7 +41,7 @@ hmac = "0.12"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "crypto-rust"] }
 mdns-sd = { version = "0.13", default-features = false, features = ["async"] }
 qrcode = { version = "0.14", default-features = false }
-rcgen = "0.13"
+rcgen = "0.14"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
