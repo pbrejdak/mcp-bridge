@@ -87,3 +87,18 @@ export interface IdentityInfo {
   pubkey: string;
   display_name: string;
 }
+
+/** Shape returned by `pair.invite_start`. Mirrors the SPEC §4.2
+ *  Invite JSON; the phone scans this (or its QR rendering). */
+export interface PairInvite {
+  spec: "mcp-pair/v0.1";
+  direction: "resolver_offered" | "origin_offered";
+  resolver: {
+    pubkey: string;
+    display_name: string;
+    sas: string;
+    lan_addr: string;
+  };
+  nonce: string;
+  uri?: string;
+}
