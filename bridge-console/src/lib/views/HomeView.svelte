@@ -7,6 +7,7 @@
     type ServerListEntry,
     TransportError,
   } from "../ipc";
+  import ActivityTab from "./ActivityTab.svelte";
   import ServersTab from "./ServersTab.svelte";
   import SettingsTab from "./SettingsTab.svelte";
 
@@ -15,7 +16,7 @@
   };
   let { onpair }: Props = $props();
 
-  type Tab = "servers" | "settings";
+  type Tab = "servers" | "activity" | "settings";
   let tab = $state<Tab>("servers");
 
   let status = $state<DaemonStatus | null>(null);
@@ -106,6 +107,15 @@
     <button
       role="tab"
       class="tab"
+      class:active={tab === "activity"}
+      aria-selected={tab === "activity"}
+      onclick={() => (tab = "activity")}
+    >
+      Activity
+    </button>
+    <button
+      role="tab"
+      class="tab"
       class:active={tab === "settings"}
       aria-selected={tab === "settings"}
       onclick={() => (tab = "settings")}
@@ -116,6 +126,8 @@
 
   {#if tab === "servers"}
     <ServersTab {servers} {loading} {error} onrefresh={refresh} {onpair} />
+  {:else if tab === "activity"}
+    <ActivityTab />
   {:else if tab === "settings"}
     <SettingsTab {identity} onrefresh={refresh} />
   {/if}

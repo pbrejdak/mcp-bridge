@@ -108,6 +108,20 @@ export interface DiagnosticsBundle {
   bundle: string;
 }
 
+/** One entry from `log.recent`. */
+export interface LogEvent {
+  seq: number;
+  timestamp: number;
+  level: string;
+  target: string;
+  message: string;
+}
+
+/** Result body of `log.recent`. */
+export interface LogRecentResult {
+  events: LogEvent[];
+}
+
 /** Shape returned by `pair.invite_start`. Mirrors the SPEC §4.2
  *  Invite JSON; the phone scans this (or its QR rendering). */
 export interface PairInvite {
