@@ -135,7 +135,7 @@ async fn start_endpoint_with_adapters(
     let endpoint = PairEndpoint {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         cert,
-        resolver: resolver.clone(),
+        resolver: mcp_bridged::identity::shared_keypair_from_arc(resolver.clone()),
         invites: invites.clone(),
         backend_verifier,
         registry: registry.clone(),

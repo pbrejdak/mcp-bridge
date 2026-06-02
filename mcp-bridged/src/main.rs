@@ -403,9 +403,17 @@ async fn run_identity_rotate(yes: bool, json_output: bool) -> Result<()> {
     println!("  revoked pins     {}", parsed.revoked_pins);
     if parsed.restart_required {
         println!();
-        println!("RESTART REQUIRED: the running daemon still uses the previous keypair.");
-        println!("Restart it (e.g. `mcp-bridge daemon --uninstall && mcp-bridge daemon --install`)");
+        println!("RESTART REQUIRED: this runtime cannot hot-swap the keypair.");
+        println!("Restart the daemon (e.g. `mcp-bridge daemon --uninstall && mcp-bridge daemon --install`)");
         println!("for the rotated identity to take effect on the wire.");
+    } else {
+        println!();
+        println!(
+            "The in-memory keypair is hot-swapped — new invites carry the new pubkey, mDNS"
+        );
+        println!(
+            "re-subscribes against the new service type. Every previously paired phone must re-pair."
+        );
     }
     Ok(())
 }

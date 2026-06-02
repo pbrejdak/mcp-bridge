@@ -38,7 +38,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::identity::{Ed25519Pubkey, Keypair};
+use crate::identity::{Ed25519Pubkey, Keypair, SharedKeypair, current_keypair};
 use crate::registry::Registry;
 
 use super::accept::{apply_announce, parse_sealed_announce};
@@ -220,20 +220,26 @@ impl MdnsSubscriber for FakeMdnsSubscriber {
 /// outer loop sleeps until the next UTC midnight (plus a 5s buffer),
 /// drops the current subscription, and re-subscribes with the freshly
 /// derived [today, yesterday] pair.
+/// `rotation_signal` is fired by identity.rotate to force an immediate
+/// re-subscribe against the new keypair's service-type HMAC. Without
+/// this the daemon would stay on the old service type until UTC
+/// midnight.
 #[allow(clippy::too_many_arguments)] // long-running task wires up the full announce pipeline
 pub async fn serve_mdns(
     subscriber: Arc<dyn MdnsSubscriber>,
-    resolver: Arc<Keypair>,
+    resolver: SharedKeypair,
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
     rate_limiter: Arc<AnnounceRateLimiter>,
     keystore: Arc<crate::identity::Keystore>,
     connector_cache: Arc<crate::proxy::ConnectorCache>,
     token_refresher: Arc<dyn crate::pair::token_refresh::BearerTokenRefresher>,
+    rotation_signal: Arc<tokio::sync::Notify>,
     cancel: CancellationToken,
 ) -> Result<(), SubscribeError> {
     loop {
-        let service_types = current_and_previous_service_types(resolver.pubkey()).to_vec();
+        let current = current_keypair(&resolver);
+        let service_types = current_and_previous_service_types(current.pubkey()).to_vec();
         info!(?service_types, "mDNS subscriber (re)subscribing");
         let mut rx = subscriber.subscribe(&service_types).await?;
         let rollover_at = next_utc_midnight_instant();
@@ -248,14 +254,22 @@ pub async fn serve_mdns(
                     info!("UTC day rolled over; refreshing mDNS subscription");
                     break;
                 }
+                () = rotation_signal.notified() => {
+                    info!("identity rotated; refreshing mDNS subscription");
+                    break;
+                }
                 ann = rx.recv() => {
                     let Some(ann) = ann else {
                         warn!("mDNS subscriber channel closed; exiting loop");
                         return Ok(());
                     };
+                    // Re-snapshot for each announcement: an
+                    // identity.rotate between iterations means we
+                    // should unseal with the new keypair.
+                    let kp_for_announce = current_keypair(&resolver);
                     handle_announcement(
                         ann,
-                        resolver.as_ref(),
+                        kp_for_announce.as_ref(),
                         &registry,
                         &registry_path,
                         rate_limiter.as_ref(),

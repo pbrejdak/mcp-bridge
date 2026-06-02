@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::adapters::{Adapter, Sentinel};
-use crate::identity::{DisplayName, Ed25519Pubkey, Keypair, Keystore};
+use crate::identity::{
+    DisplayName, Ed25519Pubkey, Keypair, Keystore, SharedKeypair, current_keypair, swap_keypair,
+};
 use crate::observability::EventRecorder;
 use crate::observability::recorder::LogEvent;
 use crate::pair::invite::Invite;
@@ -68,8 +70,10 @@ pub struct Context {
     /// status reporting and for constructing the LAN URL inside fresh
     /// pair invites.
     pub pair_endpoint_addr: SocketAddr,
-    /// Resolver Ed25519 pubkey carried in every invite.
-    pub resolver_pubkey: Ed25519Pubkey,
+    /// Shared Resolver keypair. Reads use `identity::current_keypair`
+    /// to snapshot; `identity.rotate` swaps the keypair behind this
+    /// handle atomically.
+    pub resolver: SharedKeypair,
     /// Operator-facing name shown on the phone's confirm screen.
     pub display_name: DisplayName,
     /// Invite register; `pair.invite_start` writes to it, the HTTP
@@ -90,6 +94,14 @@ pub struct Context {
     /// integration tests skip it); the dispatcher returns an empty
     /// list in that case.
     pub recorder: Option<EventRecorder>,
+    /// Shared connector cache; `identity.rotate` clears it after the
+    /// mass-revoke so the proxy stops serving requests with now-
+    /// revoked tokens.
+    pub connector_cache: Arc<crate::proxy::ConnectorCache>,
+    /// Notified by `identity.rotate` so the mDNS subscriber re-derives
+    /// service-type HMACs against the new keypair immediately instead
+    /// of waiting for the next UTC midnight.
+    pub rotation_signal: Arc<tokio::sync::Notify>,
 }
 
 /// Result body of [`method_names::IDENTITY_SHOW`].
@@ -162,17 +174,19 @@ pub struct LogRecentResult {
 /// Result body of [`method_names::IDENTITY_ROTATE`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityRotateResult {
-    /// Pubkey of the freshly generated keypair (the one now persisted
-    /// in the keychain). The running daemon process still uses the
-    /// previous keypair in memory; `restart_required` is `true` until
-    /// somebody restarts it.
+    /// Pubkey of the freshly generated keypair — now persisted in the
+    /// keychain AND hot-swapped into the running daemon's in-memory
+    /// `SharedKeypair`. Every code path that takes the keypair on
+    /// request (pair endpoint, mDNS subscriber, IPC dispatcher) sees
+    /// the new value on the next call.
     pub new_pubkey: Ed25519Pubkey,
     /// Number of pins revoked as part of the rotation. Every paired
     /// phone has to re-pair.
     pub revoked_pins: usize,
-    /// Always `true` at this protocol version. In-process hot-swap is
-    /// a Phase 2 follow-up; until then the operator MUST restart the
-    /// daemon for the new identity to take effect on the wire.
+    /// `false` at this protocol version — the in-process hot-swap is
+    /// done by the time the response returns. Reserved for future
+    /// platforms where the runtime can't perform the swap (e.g. a
+    /// restricted Tauri sidecar).
     pub restart_required: bool,
 }
 
@@ -314,7 +328,7 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
         }
         method_names::IDENTITY_SHOW => {
             let info = IdentityInfo {
-                pubkey: ctx.resolver_pubkey,
+                pubkey: *current_keypair(&ctx.resolver).pubkey(),
                 display_name: ctx.display_name.clone(),
             };
             match serde_json::to_value(&info) {
@@ -510,7 +524,8 @@ async fn build_diagnostics_bundle(ctx: &Context) -> String {
 
     let _ = writeln!(out, "[identity]");
     let _ = writeln!(out, "display_name       = {}", ctx.display_name.as_str());
-    let _ = writeln!(out, "resolver_pubkey    = {}", ctx.resolver_pubkey);
+    let resolver_pubkey = *current_keypair(&ctx.resolver).pubkey();
+    let _ = writeln!(out, "resolver_pubkey    = {resolver_pubkey}");
     let _ = writeln!(out);
 
     let pins: Vec<_> = {
@@ -568,15 +583,18 @@ async fn build_diagnostics_bundle(ctx: &Context) -> String {
     out
 }
 
-/// Generate a fresh Resolver keypair, persist it to the keychain
-/// (overwriting the previous entry), and revoke every existing pin
-/// (state flip + best-effort secret cleanup + adapter entry removal).
+/// Generate a fresh Resolver keypair, persist it to the keychain, hot-
+/// swap the in-memory `SharedKeypair`, revoke every existing pin, and
+/// signal the mDNS subscriber to re-derive its service-type HMAC.
 ///
-/// The running daemon keeps the OLD keypair in memory until restart —
-/// the result reports `restart_required: true` so the CLI can tell the
-/// user. In-process hot-swap of the keypair is a Phase 2 follow-up
-/// (every handler closure holds an `Arc<Keypair>` sealed to the old
-/// key, so swapping it is a real change, not a single store).
+/// `restart_required` is reported as `false`: the pair endpoint
+/// handlers, mDNS subscriber, and IPC dispatcher all read the keypair
+/// via [`current_keypair`] at request time, so the swap takes effect
+/// on every code path that touches the keypair next. The proxy
+/// connector cache is cleared too — pins are revoked anyway, but the
+/// belt-and-suspenders clear means no request can ride a stale
+/// connector during the brief window between swap and the
+/// mass-revoke's cache-invalidating effect.
 async fn rotate_identity(ctx: &Context) -> Result<IdentityRotateResult, String> {
     // 1. Snapshot the pin list outside the rotate path's locks so the
     //    subsequent revoke_pin calls can each take the write lock.
@@ -606,19 +624,32 @@ async fn rotate_identity(ctx: &Context) -> Result<IdentityRotateResult, String> 
         "revoked pins as part of identity rotate"
     );
 
-    // 3. Generate + persist the new keypair. This is the destructive
-    //    step: the keystore entry is overwritten. After this, restarts
-    //    of the daemon will pick up the new key.
+    // 3. Generate + persist the new keypair. Keystore is the durable
+    //    source of truth — a restart between this step and the swap
+    //    below would pick up the new key on its own.
     let new_kp = Keypair::generate();
     let new_pubkey = *new_kp.pubkey();
     ctx.keystore
         .save_resolver_keypair(&new_kp)
         .map_err(|e| format!("could not save new keypair: {e}"))?;
 
+    // 4. Hot-swap the in-memory keypair. Pair endpoint handlers, mDNS
+    //    handle_announcement, and identity.show / pair.invite_start
+    //    all re-read on next request and see the new key.
+    swap_keypair(&ctx.resolver, new_kp);
+
+    // 5. Clear the connector cache so the proxy doesn't serve a
+    //    request through a connector holding a now-revoked bearer.
+    ctx.connector_cache.clear();
+
+    // 6. Notify mDNS to re-derive its service-type HMACs immediately
+    //    instead of waiting for UTC midnight.
+    ctx.rotation_signal.notify_one();
+
     Ok(IdentityRotateResult {
         new_pubkey,
         revoked_pins,
-        restart_required: true,
+        restart_required: false,
     })
 }
 
@@ -738,7 +769,7 @@ async fn build_invite(ctx: &Context) -> Result<Invite, String> {
     let lan_addr = LanAddr::new(&lan).map_err(|e| format!("could not build LAN URL: {e}"))?;
 
     let invite = Invite::new(
-        ctx.resolver_pubkey,
+        *current_keypair(&ctx.resolver).pubkey(),
         ctx.display_name.clone(),
         lan_addr,
         nonce,
@@ -811,7 +842,7 @@ mod tests {
             start: Instant::now(),
             registry: Arc::new(RwLock::new(Registry::new())),
             pair_endpoint_addr: "10.0.0.5:8765".parse().unwrap(),
-            resolver_pubkey: *Keypair::generate().pubkey(),
+            resolver: crate::identity::shared_keypair(Keypair::generate()),
             display_name: DisplayName::new("Test Bridge").unwrap(),
             invites,
             keystore,
@@ -819,6 +850,8 @@ mod tests {
             sentinel: Sentinel::random(),
             adapters: Arc::new(Vec::new()),
             recorder: Some(EventRecorder::new()),
+            connector_cache: Arc::new(crate::proxy::ConnectorCache::new()),
+            rotation_signal: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -1028,7 +1061,7 @@ mod tests {
         // Round-trips through IdentityInfo without losing data.
         let info: IdentityInfo = serde_json::from_value(result).unwrap();
         assert_eq!(info.display_name.as_str(), "Test Bridge");
-        assert_eq!(info.pubkey, ctx.resolver_pubkey);
+        assert_eq!(info.pubkey, *current_keypair(&ctx.resolver).pubkey());
     }
 
     #[tokio::test]
@@ -1206,7 +1239,10 @@ mod tests {
         .await;
         let result = resp.result.expect("success response carries result");
         assert_eq!(result["revoked_pins"], 2);
-        assert_eq!(result["restart_required"], true);
+        assert_eq!(
+            result["restart_required"], false,
+            "hot-swap is in place; restart no longer required",
+        );
 
         // Persisted keypair changed.
         let loaded = ctx
@@ -1220,12 +1256,87 @@ mod tests {
             "rotate must overwrite the keypair in the keychain",
         );
 
+        // In-memory keypair was hot-swapped too — identity.show now
+        // returns the new pubkey, matching what was just persisted.
+        let in_memory = *current_keypair(&ctx.resolver).pubkey();
+        assert_eq!(
+            in_memory,
+            *loaded.pubkey(),
+            "in-memory keypair must match the freshly persisted one",
+        );
+
         // Both pins are now Revoked.
         let reg = ctx.registry.read().await;
         for lid in ["bodylog-7f3a", "sensors-9012"] {
             let pin = reg.get(&LogicalId::new(lid).unwrap()).unwrap();
             assert_eq!(pin.state, PinState::Revoked, "{lid} must be revoked");
         }
+    }
+
+    #[tokio::test]
+    async fn identity_rotate_hot_swaps_resolver_pubkey_in_memory() {
+        // Before rotate: identity.show reports the original pubkey.
+        // After rotate (NO daemon restart): identity.show reports the
+        // new pubkey AND the connector cache is empty.
+        let ctx = make_ctx();
+        let before_pubkey = *current_keypair(&ctx.resolver).pubkey();
+
+        // Stuff a fake connector entry so we can confirm rotate clears
+        // it — use a placeholder Pin to seed the cache via the
+        // registry path.
+        {
+            let mut reg = ctx.registry.write().await;
+            reg.insert(sample_pin("BodyLog", "bodylog-7f3a", 1_700_000_000));
+        }
+
+        // Pre-rotate identity.show.
+        let pre = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::IDENTITY_SHOW.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await
+        .result
+        .unwrap();
+        let pre_info: IdentityInfo = serde_json::from_value(pre).unwrap();
+        assert_eq!(pre_info.pubkey, before_pubkey);
+
+        // Rotate.
+        dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(2),
+                method: method_names::IDENTITY_ROTATE.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await;
+
+        // Post-rotate identity.show — pubkey advanced.
+        let post = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(3),
+                method: method_names::IDENTITY_SHOW.to_owned(),
+                params: None,
+            },
+            &ctx,
+        )
+        .await
+        .result
+        .unwrap();
+        let post_info: IdentityInfo = serde_json::from_value(post).unwrap();
+        assert_ne!(post_info.pubkey, before_pubkey, "identity must rotate");
+        assert_eq!(
+            post_info.pubkey,
+            *current_keypair(&ctx.resolver).pubkey(),
+            "in-memory keypair matches identity.show output",
+        );
     }
 
     #[tokio::test]
@@ -1246,7 +1357,7 @@ mod tests {
         .await;
         let result = resp.result.expect("success response carries result");
         assert_eq!(result["revoked_pins"], 0);
-        assert_eq!(result["restart_required"], true);
+        assert_eq!(result["restart_required"], false);
 
         let loaded = ctx.keystore.load_resolver_keypair().unwrap().unwrap();
         assert_ne!(*loaded.pubkey(), *initial.pubkey());

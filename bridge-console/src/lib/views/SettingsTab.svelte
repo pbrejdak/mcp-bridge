@@ -207,11 +207,17 @@
       </dl>
       {#if rotateResult.restart_required}
         <div class="warn-banner">
-          <b>Restart required.</b> The running daemon still uses the previous
-          keypair in memory. Stop and restart it (or
+          <b>Restart required.</b> This runtime cannot hot-swap the keypair.
+          Stop and restart the daemon (or
           <code>mcp-bridge daemon --uninstall && --install</code>) for the
           rotated identity to take effect on the wire.
         </div>
+      {:else}
+        <p class="muted">
+          The in-memory keypair is hot-swapped — new invites carry the new
+          pubkey, and the mDNS subscriber re-subscribes against the new
+          service type.
+        </p>
       {/if}
       {#snippet actions()}
         <button class="primary" onclick={closeRotate}>Done</button>

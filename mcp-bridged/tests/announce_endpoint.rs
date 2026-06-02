@@ -66,7 +66,7 @@ async fn start_endpoint() -> EndpointHandles {
     let endpoint = PairEndpoint {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         cert,
-        resolver: resolver.clone(),
+        resolver: mcp_bridged::identity::shared_keypair_from_arc(resolver.clone()),
         invites,
         backend_verifier: Arc::new(AlwaysAccept),
         registry: registry.clone(),

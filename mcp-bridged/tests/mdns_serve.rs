@@ -16,10 +16,13 @@ use mcp_bridged::announce::payload::{
     AnnounceBackend, AnnouncePayload, SpecVersion as AnnounceSpec,
 };
 use mcp_bridged::announce::{AnnounceRateLimiter, MdnsSubscriber};
-use mcp_bridged::identity::{DisplayName, Ed25519Pubkey, Keypair, Keystore, Signature};
 use mcp_bridged::identity::keystore::install_mock_backend;
+use mcp_bridged::identity::{
+    DisplayName, Ed25519Pubkey, Keypair, Keystore, Signature, shared_keypair_from_arc,
+};
 use mcp_bridged::pair::token_refresh::{BearerTokenRefresher, WellKnownPathRefresher};
 use mcp_bridged::proxy::ConnectorCache;
+use tokio::sync::Notify;
 use mcp_bridged::pair::auth::{Auth, AuthType};
 use mcp_bridged::pair::backend_url::BackendUrl;
 use mcp_bridged::pair::bearer_token::BearerToken;
@@ -121,7 +124,7 @@ async fn mdns_serve_accepts_a_signed_announce_and_persists() {
     let cancel = CancellationToken::new();
 
     let subscriber_for_task: Arc<dyn MdnsSubscriber> = subscriber.clone();
-    let resolver_for_task = resolver.clone();
+    let resolver_for_task = shared_keypair_from_arc(resolver.clone());
     let registry_for_task = registry.clone();
     let path_for_task = registry_path.clone();
     let limiter_for_task = rate_limiter.clone();
@@ -130,6 +133,7 @@ async fn mdns_serve_accepts_a_signed_announce_and_persists() {
     let keystore = Arc::new(Keystore::for_service("mdns-test-1").expect("keystore"));
     let cache = Arc::new(ConnectorCache::new());
     let refresher: Arc<dyn BearerTokenRefresher> = Arc::new(WellKnownPathRefresher);
+    let rotation_signal = Arc::new(Notify::new());
     let task = tokio::spawn(async move {
         mdns::serve_mdns(
             subscriber_for_task,
@@ -140,6 +144,7 @@ async fn mdns_serve_accepts_a_signed_announce_and_persists() {
             keystore,
             cache,
             refresher,
+            rotation_signal,
             cancel_for_task,
         )
         .await
@@ -208,8 +213,9 @@ async fn mdns_serve_resubscribes_after_utc_midnight() {
     let keystore = Arc::new(Keystore::for_service("mdns-test-2").expect("keystore"));
     let cache = Arc::new(ConnectorCache::new());
     let refresher: Arc<dyn BearerTokenRefresher> = Arc::new(WellKnownPathRefresher);
+    let rotation_signal = Arc::new(Notify::new());
     let task = tokio::spawn({
-        let resolver = resolver.clone();
+        let resolver = shared_keypair_from_arc(resolver.clone());
         let registry = registry.clone();
         let registry_path = registry_path.clone();
         let cancel = cancel.clone();
@@ -223,6 +229,7 @@ async fn mdns_serve_resubscribes_after_utc_midnight() {
                 keystore,
                 cache,
                 refresher,
+                rotation_signal,
                 cancel,
             )
             .await
@@ -264,7 +271,7 @@ async fn mdns_serve_drops_malformed_txt_without_touching_registry() {
     let cancel = CancellationToken::new();
 
     let subscriber_for_task: Arc<dyn MdnsSubscriber> = subscriber.clone();
-    let resolver_for_task = resolver.clone();
+    let resolver_for_task = shared_keypair_from_arc(resolver.clone());
     let registry_for_task = registry.clone();
     let path_for_task = registry_path.clone();
     let limiter_for_task = rate_limiter.clone();
@@ -273,6 +280,7 @@ async fn mdns_serve_drops_malformed_txt_without_touching_registry() {
     let keystore = Arc::new(Keystore::for_service("mdns-test-3").expect("keystore"));
     let cache = Arc::new(ConnectorCache::new());
     let refresher: Arc<dyn BearerTokenRefresher> = Arc::new(WellKnownPathRefresher);
+    let rotation_signal = Arc::new(Notify::new());
     let task = tokio::spawn(async move {
         mdns::serve_mdns(
             subscriber_for_task,
@@ -283,6 +291,7 @@ async fn mdns_serve_drops_malformed_txt_without_touching_registry() {
             keystore,
             cache,
             refresher,
+            rotation_signal,
             cancel_for_task,
         )
         .await

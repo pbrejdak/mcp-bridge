@@ -52,7 +52,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
     let keystore = Arc::new(Keystore::new()?);
     let kp = keystore.load_or_generate_resolver_keypair()?;
     let pubkey_str = kp.pubkey().to_string();
-    let resolver = Arc::new(kp);
+    let resolver = crate::identity::shared_keypair(kp);
     info!(pubkey = %pubkey_str, "Resolver identity loaded");
 
     let cert = generate_self_signed_cert(config.bind_addr.ip())?;
@@ -71,8 +71,8 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
 
     let adapters: Arc<Vec<Arc<dyn Adapter>>> = Arc::new(vec![Arc::new(ClaudeDesktopAdapter::new())]);
 
-    let resolver_pubkey = *resolver.pubkey();
     let resolver_for_mdns = resolver.clone();
+    let resolver_for_ipc = resolver.clone();
     let invites_for_ipc = invites.clone();
     let registry_path_for_ipc = registry_path.clone();
     let registry_path_for_mdns = registry_path.clone();
@@ -85,9 +85,17 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
     let connector_cache = Arc::new(crate::proxy::ConnectorCache::new());
     let connector_cache_for_endpoint = connector_cache.clone();
     let connector_cache_for_mdns = connector_cache.clone();
+    let connector_cache_for_ipc = connector_cache.clone();
     let token_refresher: Arc<dyn crate::pair::token_refresh::BearerTokenRefresher> =
         Arc::new(crate::pair::token_refresh::WellKnownPathRefresher);
     let token_refresher_for_mdns = token_refresher.clone();
+
+    // identity.rotate fires this notify so the mDNS subscriber breaks
+    // out of its waiting loop and re-derives the service-type HMAC
+    // against the freshly rotated keypair (rather than waiting for
+    // UTC midnight).
+    let rotation_signal = Arc::new(tokio::sync::Notify::new());
+    let rotation_signal_for_mdns = rotation_signal.clone();
 
     let endpoint = PairEndpoint {
         bind_addr: config.bind_addr,
@@ -112,7 +120,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         start: Instant::now(),
         registry: registry.clone(),
         pair_endpoint_addr: bound.local_addr,
-        resolver_pubkey,
+        resolver: resolver_for_ipc,
         display_name: config.display_name.clone(),
         invites: invites_for_ipc,
         keystore: keystore.clone(),
@@ -120,6 +128,8 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         sentinel,
         adapters: adapters_for_ipc,
         recorder: crate::observability::recorder(),
+        connector_cache: connector_cache_for_ipc,
+        rotation_signal,
     };
     let ipc_socket_path = config.ipc_socket_path();
     let ipc_cancel = cancel.clone();
@@ -161,6 +171,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
                     keystore_for_mdns,
                     connector_cache_for_mdns,
                     token_refresher_for_mdns,
+                    rotation_signal_for_mdns,
                     mdns_cancel,
                 )
                 .await

@@ -38,7 +38,7 @@ use tracing::{error, info, warn};
 
 use crate::adapters::{Adapter, AdapterEntry, Sentinel};
 use crate::announce::{AnnounceRateLimiter, apply_announce, parse_sealed_announce};
-use crate::identity::{Keypair, Keystore, SelfSignedCert};
+use crate::identity::{Keystore, SelfSignedCert, SharedKeypair, current_keypair};
 use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::invite_register::InviteRegister;
@@ -52,7 +52,7 @@ use crate::registry::{Registry, ServerPin};
 pub struct PairEndpoint {
     pub bind_addr: SocketAddr,
     pub cert: SelfSignedCert,
-    pub resolver: Arc<Keypair>,
+    pub resolver: SharedKeypair,
     pub invites: InviteRegister,
     pub backend_verifier: Arc<dyn BackendVerifier>,
     /// In-memory pin registry. Writes happen here on every successful
@@ -140,7 +140,7 @@ pub struct BoundEndpoint {
     pub local_addr: SocketAddr,
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    resolver: Arc<Keypair>,
+    resolver: SharedKeypair,
     invites: InviteRegister,
     backend_verifier: Arc<dyn BackendVerifier>,
     registry: Arc<RwLock<Registry>>,
@@ -201,7 +201,7 @@ impl BoundEndpoint {
 /// Per-request state shared with axum handlers.
 struct AppState {
     local_addr: SocketAddr,
-    resolver: Arc<Keypair>,
+    resolver: SharedKeypair,
     invites: InviteRegister,
     backend_verifier: Arc<dyn BackendVerifier>,
     registry: Arc<RwLock<Registry>>,
@@ -216,9 +216,11 @@ struct AppState {
 }
 
 async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
+    // Snapshot the current keypair — held across the .await below.
+    let resolver = current_keypair(&state.resolver);
     let Ok(payload) = accept_direction_b(
         &body,
-        state.resolver.as_ref(),
+        resolver.as_ref(),
         &state.invites,
         state.backend_verifier.as_ref(),
         state.local_addr,
@@ -313,7 +315,8 @@ async fn handle_announce(
         return StatusCode::BAD_REQUEST;
     }
 
-    let payload = match parse_sealed_announce(&body, state.resolver.as_ref()) {
+    let resolver = current_keypair(&state.resolver);
+    let payload = match parse_sealed_announce(&body, resolver.as_ref()) {
         Ok(p) => p,
         Err(e) => {
             tracing::debug!(error = ?e, "announce rejected at parse");

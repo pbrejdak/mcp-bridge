@@ -379,7 +379,7 @@ mod tests {
             start: Instant::now(),
             registry: Arc::new(RwLock::new(Registry::new())),
             pair_endpoint_addr: "10.0.0.5:8765".parse().unwrap(),
-            resolver_pubkey: *Keypair::generate().pubkey(),
+            resolver: crate::identity::shared_keypair(Keypair::generate()),
             display_name: DisplayName::new("Test Bridge").unwrap(),
             invites,
             keystore,
@@ -387,6 +387,8 @@ mod tests {
             sentinel: Sentinel::random(),
             adapters: Arc::new(Vec::new()),
             recorder: Some(crate::observability::EventRecorder::new()),
+            connector_cache: Arc::new(crate::proxy::ConnectorCache::new()),
+            rotation_signal: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
