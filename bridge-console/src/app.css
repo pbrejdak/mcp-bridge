@@ -14,7 +14,13 @@
 
 body {
   margin: 0;
-  background: light-dark(#fafafa, #1a1a1a);
+  /* Semi-transparent so the platform backdrop (NSVisualEffect Sidebar
+   * on macOS, Mica on Windows 11) shows through in the gaps between
+   * opaque cards. Linux has no native backdrop here, but the alpha is
+   * small enough that the window's default chrome still looks normal.
+   * Cards / tables / modals each set their own opaque-ish background
+   * so content stays readable. */
+  background: light-dark(rgba(250, 250, 250, 0.6), rgba(26, 26, 26, 0.5));
   color: light-dark(#1a1a1a, #f0f0f0);
 }
 
