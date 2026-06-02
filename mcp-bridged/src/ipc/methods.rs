@@ -204,6 +204,12 @@ pub struct PairInviteCancelParams {
 pub struct ServersRevokeParams {
     /// Logical_id of the pin to revoke.
     pub pin_id: LogicalId,
+    /// Optional Adapter name. When present, the pin keeps its state
+    /// and per-Pin secrets — only the named adapter's config entry is
+    /// removed. When omitted, the pin is revoked outright (state →
+    /// Revoked, all adapter entries removed, keychain entries deleted).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub consumer: Option<String>,
 }
 
 /// Result body for [`method_names::SERVERS_REVOKE`].
@@ -211,8 +217,13 @@ pub struct ServersRevokeParams {
 pub struct ServersRevokeResult {
     pub pin_id: LogicalId,
     /// True when the pin existed and was transitioned to Revoked. False
-    /// when the pin existed but was already Revoked (no-op).
+    /// when the pin existed but was already Revoked, OR when a
+    /// per-Consumer revoke succeeded (the pin itself isn't revoked).
     pub revoked: bool,
+    /// True when the request named a Consumer and the adapter's entry
+    /// was removed. Absent (or false) for whole-pin revokes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub consumer_removed: Option<String>,
 }
 
 /// One row in the [`method_names::SERVERS_LIST`] response.
@@ -430,7 +441,11 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     return JsonRpcResponse::error(id, error_codes::INVALID_PARAMS, msg);
                 }
             };
-            match revoke_pin(ctx, params.pin_id).await {
+            let outcome = match params.consumer {
+                Some(name) => revoke_consumer(ctx, params.pin_id, name).await,
+                None => revoke_pin(ctx, params.pin_id).await,
+            };
+            match outcome {
                 Ok(result) => match serde_json::to_value(&result) {
                     Ok(value) => JsonRpcResponse::success(id, value),
                     Err(e) => JsonRpcResponse::error(
@@ -443,6 +458,11 @@ pub async fn dispatch(req: JsonRpcRequest, ctx: &Context) -> JsonRpcResponse {
                     id,
                     error_codes::INVALID_PARAMS,
                     "no pin matches that pin_id".to_owned(),
+                ),
+                Err(RevokeError::UnknownConsumer(name)) => JsonRpcResponse::error(
+                    id,
+                    error_codes::INVALID_PARAMS,
+                    format!("no registered adapter named `{name}`"),
                 ),
                 Err(RevokeError::Internal(msg)) => {
                     JsonRpcResponse::error(id, error_codes::INTERNAL_ERROR, msg)
@@ -602,10 +622,12 @@ async fn rotate_identity(ctx: &Context) -> Result<IdentityRotateResult, String> 
     })
 }
 
-/// Failure modes from [`revoke_pin`] reused by the dispatcher arm.
+/// Failure modes from [`revoke_pin`] / [`revoke_consumer`] reused by
+/// the dispatcher arm.
 #[derive(Debug)]
 enum RevokeError {
     UnknownPin,
+    UnknownConsumer(String),
     Internal(String),
 }
 
@@ -663,6 +685,44 @@ async fn revoke_pin(
     Ok(ServersRevokeResult {
         pin_id,
         revoked: !already_revoked,
+        consumer_removed: None,
+    })
+}
+
+/// Per-Consumer revoke: keep the pin alive (state stays Reachable /
+/// Unreachable) and the per-pin secrets in the keychain, but ask one
+/// named Adapter to remove its config entry for this pin. Lets the
+/// operator unplug a single Consumer (e.g. uninstall Claude Desktop
+/// while keeping Cursor still paired) without re-pairing the phone.
+async fn revoke_consumer(
+    ctx: &Context,
+    pin_id: LogicalId,
+    consumer: String,
+) -> Result<ServersRevokeResult, RevokeError> {
+    {
+        let reg = ctx.registry.read().await;
+        if reg.get(&pin_id).is_none() {
+            return Err(RevokeError::UnknownPin);
+        }
+    }
+    let adapter = ctx
+        .adapters
+        .iter()
+        .find(|a| a.name() == consumer)
+        .cloned()
+        .ok_or_else(|| RevokeError::UnknownConsumer(consumer.clone()))?;
+    if let Err(e) = adapter.remove_entry(&pin_id, ctx.sentinel).await {
+        tracing::warn!(
+            error = ?e,
+            adapter = consumer.as_str(),
+            %pin_id,
+            "adapter remove_entry failed on per-Consumer revoke",
+        );
+    }
+    Ok(ServersRevokeResult {
+        pin_id,
+        revoked: false,
+        consumer_removed: Some(consumer),
     })
 }
 
@@ -1356,6 +1416,108 @@ mod tests {
             .get(&LogicalId::new("bodylog-7f3a").unwrap())
             .unwrap();
         assert_eq!(pin.state, PinState::Revoked);
+    }
+
+    /// Recording adapter the per-Consumer revoke tests inject so they
+    /// can assert remove_entry was called with the expected
+    /// (logical_id, sentinel).
+    struct RecordingAdapter {
+        calls: std::sync::Mutex<Vec<(LogicalId, Sentinel)>>,
+    }
+    #[async_trait::async_trait]
+    impl Adapter for RecordingAdapter {
+        fn name(&self) -> &'static str {
+            "claude-desktop"
+        }
+        async fn detect(
+            &self,
+        ) -> Result<Option<crate::adapters::Detected>, crate::adapters::AdapterError> {
+            Ok(None)
+        }
+        async fn write_entry(
+            &self,
+            _e: &crate::adapters::AdapterEntry,
+        ) -> Result<(), crate::adapters::AdapterError> {
+            Ok(())
+        }
+        async fn remove_entry(
+            &self,
+            logical_id: &LogicalId,
+            sentinel: Sentinel,
+        ) -> Result<(), crate::adapters::AdapterError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((logical_id.clone(), sentinel));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn servers_revoke_per_consumer_keeps_pin_alive_and_returns_consumer_name() {
+        let ctx = make_ctx();
+        {
+            let mut reg = ctx.registry.write().await;
+            reg.insert(sample_pin("BodyLog", "bodylog-7f3a", 1_700_000_000));
+        }
+        let recorder = Arc::new(RecordingAdapter {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut ctx = ctx;
+        ctx.adapters = Arc::new(vec![recorder.clone() as Arc<dyn Adapter>]);
+
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::SERVERS_REVOKE.to_owned(),
+                params: Some(serde_json::json!({
+                    "pin_id": "bodylog-7f3a",
+                    "consumer": "claude-desktop",
+                })),
+            },
+            &ctx,
+        )
+        .await;
+        let result = resp.result.expect("success response carries result");
+        assert_eq!(result["pin_id"], "bodylog-7f3a");
+        assert_eq!(result["revoked"], false, "pin stays alive");
+        assert_eq!(result["consumer_removed"], "claude-desktop");
+
+        // Pin state untouched.
+        let reg = ctx.registry.read().await;
+        let pin = reg.get(&LogicalId::new("bodylog-7f3a").unwrap()).unwrap();
+        assert_eq!(pin.state, PinState::Reachable);
+        drop(reg);
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_str(), "bodylog-7f3a");
+    }
+
+    #[tokio::test]
+    async fn servers_revoke_per_consumer_unknown_adapter_is_an_error() {
+        let ctx = make_ctx();
+        {
+            let mut reg = ctx.registry.write().await;
+            reg.insert(sample_pin("BodyLog", "bodylog-7f3a", 1_700_000_000));
+        }
+        let resp = dispatch(
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: serde_json::json!(1),
+                method: method_names::SERVERS_REVOKE.to_owned(),
+                params: Some(serde_json::json!({
+                    "pin_id": "bodylog-7f3a",
+                    "consumer": "cursor",
+                })),
+            },
+            &ctx,
+        )
+        .await;
+        let err = resp.error.expect("unknown consumer must be an error");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS);
+        assert!(err.message.contains("cursor"));
     }
 
     #[tokio::test]

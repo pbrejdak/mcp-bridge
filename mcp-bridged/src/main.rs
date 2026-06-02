@@ -515,21 +515,20 @@ async fn run_revoke(
     consumer: Option<String>,
     json_output: bool,
 ) -> Result<()> {
-    if consumer.is_some() {
-        bail!(
-            "per-Consumer revoke is not implemented yet — see docs/ROADMAP.md \
-             Phase 2 (per-Consumer ACLs)"
-        );
-    }
-
     let config = Config::defaults().context("resolving default config")?;
     let socket = config.ipc_socket_path();
+
+    let mut params = serde_json::Map::new();
+    params.insert("pin_id".to_owned(), serde_json::Value::String(pin.clone()));
+    if let Some(ref c) = consumer {
+        params.insert("consumer".to_owned(), serde_json::Value::String(c.clone()));
+    }
 
     let request = ipc::JsonRpcRequest {
         jsonrpc: "2.0".to_owned(),
         id: serde_json::json!("revoke-1"),
         method: ipc::method_names::SERVERS_REVOKE.to_owned(),
-        params: Some(serde_json::json!({ "pin_id": pin })),
+        params: Some(serde_json::Value::Object(params)),
     };
     let response = call_with_friendly_error(&socket, &request).await?;
     if let Some(err) = response.error {
@@ -544,12 +543,21 @@ async fn run_revoke(
         return Ok(());
     }
 
-    let revoked = result["revoked"].as_bool().unwrap_or(false);
     let pin_id = result["pin_id"].as_str().unwrap_or(&pin);
-    if revoked {
-        println!("Revoked {pin_id}.");
+    if let Some(c) = consumer.as_ref() {
+        let removed = result["consumer_removed"].as_str();
+        if removed == Some(c.as_str()) {
+            println!("Removed {pin_id} from {c}. Pin remains paired.");
+        } else {
+            println!("No change for {pin_id} ({c}).");
+        }
     } else {
-        println!("{pin_id} was already revoked. (no-op)");
+        let revoked = result["revoked"].as_bool().unwrap_or(false);
+        if revoked {
+            println!("Revoked {pin_id}.");
+        } else {
+            println!("{pin_id} was already revoked. (no-op)");
+        }
     }
     Ok(())
 }
