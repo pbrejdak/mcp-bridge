@@ -36,6 +36,33 @@ get a "Daemon not reachable" banner and a Refresh button — start the
 daemon with `mcp-bridge daemon` (or `mcp-bridge daemon --install`) and
 click Refresh.
 
+### macOS Tahoe (26.x) — launchd-installed daemon hangs
+
+On macOS 26 (Tahoe) with an unsigned / ad-hoc-signed daemon binary,
+the launchd-spawned daemon hangs indefinitely in dyld's
+code-signature validation — the process is alive but never finishes
+boot, never writes logs, never binds the IPC socket. The same binary
+runs cleanly in 2 seconds when invoked directly from a shell.
+
+Until proper Developer ID code signing + notarization land (tracked
+in [`docs/ROADMAP.md`](../docs/ROADMAP.md) §6, blocked on the
+$99/yr Apple Developer account), run the daemon in the foreground:
+
+```sh
+# Build the daemon once.
+cargo build --release --bin mcp-bridge
+
+# In one terminal, run it in the foreground.
+./target/release/mcp-bridge daemon
+
+# In another, develop the Console against the running daemon.
+cd bridge-console && npm run tauri dev
+```
+
+`mcp-bridge daemon --uninstall` followed by no `--install` removes
+any stale launchd plist. The Console talks to the foreground daemon
+over the same IPC socket either way.
+
 ## Build
 
 ```sh

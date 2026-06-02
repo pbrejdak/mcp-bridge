@@ -38,42 +38,85 @@ Phase 1 end-to-end pair-and-proxy flow:
   buffered Vec; tools/call responses ride end-to-end without buffering.
 - **`mcp-announce/v0.1` (SPEC §5)** — typed `AnnouncePayload`, the
   `/announce` HTTPS endpoint, all 7 acceptance rules (sig, seq, exp,
-  fp/auth ratchets), and SPEC §5.6 pre-signature rate limits (8/s/IP +
-  1/s/LID). mDNS subscriber is deferred to a follow-up commit.
+  fp/auth ratchets), and SPEC §5.6 pre-signature rate limits (8/s/IP
+  for HTTP, 4/s/IP for mDNS, 1/s/LID for both).
+- **mDNS carrier (SPEC §5.2)** — daily-rotated `_mcp-bridge-<HMAC>.
+  _tcp.local` service type, `MdnsSubscriber` trait + pure-Rust
+  `mdns-sd` backend, async bridge task that pipes resolved TXT
+  records into the same accept pipeline as the HTTP carrier. Outer
+  loop re-subscribes at UTC midnight when the daily HMAC rolls.
+- **Bearer-token rotation (SPEC §5.7)** — when an accepted announce
+  asserts `auth_rotated_at` strictly greater than the recorded value,
+  the daemon fetches a fresh bearer via the
+  `BearerTokenRefresher` trait, persists it, and invalidates the
+  pooled `OriginConnector`. Default impl follows the well-known
+  convention `GET <backend>/.well-known/mcp-bridge/refresh-token`
+  (the spec leaves the control-call shape out of scope).
 - **Client Adapters** — `Adapter` trait + `Sentinel` per-install UUID
   + a `ClaudeDesktopAdapter` that writes `mcpServers/<lid>` entries
   atomically and removes only entries it owns on revoke.
 - **IPC (UDS on Unix, named-pipe on Windows)** — JSON-RPC 2.0 over a
   length-prefixed frame protocol. Methods:
   - `daemon.status`
-  - `servers.list`, `servers.detail`, `servers.revoke`
+  - `servers.list`, `servers.detail`, `servers.revoke` (with optional
+    per-Consumer scope: when `consumer` is set, only the named
+    adapter's entry is removed and the pin stays alive)
   - `pair.invite_start`, `pair.invite_cancel`
-  - `identity.show`
+  - `identity.show`, `identity.rotate` (hot-swaps the in-memory
+    keypair; clears the proxy connector cache and signals mDNS to
+    re-derive its service-type HMAC immediately)
+  - `log.recent`, `diagnostics.bundle`, `update.check`
 - **CLI surface** (`mcp-bridge`):
   - `daemon` (long-running mode), `daemon --install` / `--uninstall`
-    (macOS launchd plist today; Linux systemd-user and Windows
-    Scheduled Task pending).
+    (launchd plist on macOS, systemd-user unit on Linux, Scheduled
+    Task on Windows).
   - `pair` — generates an invite, renders a terminal QR code, polls
     until a phone completes the POST or Ctrl-C cancels it.
-  - `list`, `show <pin>`, `revoke <pin>`, `status`, `identity show`.
+  - `list`, `show <pin>`, `revoke <pin> [<consumer>]`, `status`,
+    `identity show`, `identity rotate`, `logs [--follow]`,
+    `diagnostics`, `update`.
 - **Cross-platform support** — Unix UDS and Windows named-pipe IPC;
   macOS launchd installer; verified compile against
   `x86_64-pc-windows-gnu` via cross-check.
 - **CLAUDE.md** at `mcp-bridged/CLAUDE.md` documenting Rust + cross-
   platform conventions for contributors and AI assistants.
 
-Phase 2 in progress (`bridge-console` crate + npm package):
+Phase 2 (`bridge-console` crate + npm package — Tauri 2 + Svelte 5 +
+Vite + TypeScript under [`bridge-console/`](bridge-console/)):
 
-- **Bridge Console scaffold** — Tauri 2 + Svelte 5 + Vite + TypeScript
-  under [`bridge-console/`](bridge-console/). One Console window today,
-  showing daemon status + identity + the paired-servers table. Tray
-  icon, pair-window (QR + SAS), and activity feed are tracked for
-  follow-up commits.
+- **Console window** — header status grid (daemon version / uptime /
+  pair-endpoint / Resolver name), three tabs:
+  - **Servers** — paired-pin table with per-row Revoke action
+    (confirmation modal + adapter cleanup).
+  - **Activity** — polls `log.recent` every 1s with a seq cursor;
+    Pause/Resume + Clear controls.
+  - **Settings** — Identity card (display name, full pubkey, Copy
+    button, destructive Rotate identity… modal with typed "rotate"
+    confirmation), Updates card (calls `update.check`), Diagnostics
+    card (wide modal showing the bundle from `diagnostics.bundle`
+    with a Copy-to-clipboard button).
+- **Pair flow** — separate view with QR + SAS + 60s countdown.
+  Polls `servers.list` for a new pin; success / expired / cancel
+  states. Hits `pair.invite_cancel` on user abort and on timeout so
+  the daemon's invite register releases the nonce immediately.
+- **System tray** — `tauri-plugin-tray` (built-in) icon with
+  Open / Pair new server / Quit menu. Close-button hides instead of
+  exits so the tray stays alive; left-click brings the window back.
+- **Deep-link handler** — `tauri-plugin-deep-link` registers the
+  `mcp-bridge://pair[/…]` URI scheme; incoming URLs switch to the
+  pair view. Path content is reserved for future semantics.
+- **Single-instance plugin** — second launch focuses the existing
+  window instead of spawning a duplicate.
+- **Window effects** — `window-vibrancy` integration: NSVisualEffect
+  Sidebar material on macOS, Mica on Windows 11, no-op on Linux.
 - **`daemon_call` Tauri command** wraps `mcp_bridged::ipc::call_local`
   so the renderer talks to the same UDS / Windows named-pipe the CLI
   uses. Renderer-side TypeScript hits it via a typed
   `daemonCall<T>(method, params)` helper with `DaemonError` and
   `TransportError` thrown on the two failure modes.
+- **Reusable Svelte components** under `src/lib/components/` (Modal
+  with backdrop+Escape) and shared `app.css` with design tokens +
+  button variants.
 
 Existing design/policy documentation set:
 
@@ -106,7 +149,11 @@ Existing design/policy documentation set:
 
 ### Fixed
 
-- (none)
+- mDNS subscriber: pass fully-qualified service names to `mdns-sd`'s
+  `browse()` (which insists on the trailing dot). Without this, the
+  daemon kept running with mDNS silently dead — pair endpoint, IPC,
+  and loopback listener still came up fine, but mDNS announces were
+  rejected at the browse call.
 
 ### Security
 
