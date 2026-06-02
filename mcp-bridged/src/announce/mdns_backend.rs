@@ -58,10 +58,20 @@ impl MdnsSubscriber for MdnsSdSubscriber {
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
 
         for service_type in service_types {
+            // mdns-sd's browse() insists on the fully-qualified form
+            // with a trailing dot ("_xxx._tcp.local."). SPEC §5.2 writes
+            // the type without the dot; both refer to the same name on
+            // the wire. Normalise here so the SPEC-level helper stays
+            // unchanged.
+            let fq = if service_type.ends_with('.') {
+                service_type.clone()
+            } else {
+                format!("{service_type}.")
+            };
             let browse_rx = self
                 .daemon
-                .browse(service_type)
-                .map_err(|e| SubscribeError::Backend(format!("browse {service_type}: {e}")))?;
+                .browse(&fq)
+                .map_err(|e| SubscribeError::Backend(format!("browse {fq}: {e}")))?;
             let tx = tx.clone();
             // One drain task per service type. mdns-sd's receiver is
             // a flume::Receiver; we use its `recv_async` for tokio
