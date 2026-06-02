@@ -145,6 +145,8 @@ async fn start_endpoint_with_adapters(
         sentinel,
         adapters,
         announce_rate_limiter: Arc::new(AnnounceRateLimiter::http_default()),
+        connector_cache: Arc::new(mcp_bridged::proxy::ConnectorCache::new()),
+        token_refresher: Arc::new(mcp_bridged::pair::token_refresh::WellKnownPathRefresher),
     };
     let bound = endpoint.bind().expect("bind to 127.0.0.1:0");
     let local_addr = bound.local_addr;

@@ -215,6 +215,7 @@ impl LoopbackHarness {
             bind_addr: listener_addr,
             registry: registry.clone(),
             keystore: keystore.clone(),
+            connectors: Arc::new(mcp_bridged::proxy::ConnectorCache::new()),
         };
         let cancel_for_task = listener_cancel.clone();
         let listener_task = tokio::spawn(async move {

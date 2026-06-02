@@ -16,5 +16,5 @@ pub mod listener;
 pub mod pinning_verifier;
 
 pub use connector::{ConnectorError, ForwardRequest, ForwardResponse, OriginConnector};
-pub use listener::{ListenerError, LoopbackListener};
+pub use listener::{ConnectorCache, ListenerError, LoopbackListener};
 pub use pinning_verifier::PinningVerifier;

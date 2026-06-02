@@ -220,12 +220,16 @@ impl MdnsSubscriber for FakeMdnsSubscriber {
 /// outer loop sleeps until the next UTC midnight (plus a 5s buffer),
 /// drops the current subscription, and re-subscribes with the freshly
 /// derived [today, yesterday] pair.
+#[allow(clippy::too_many_arguments)] // long-running task wires up the full announce pipeline
 pub async fn serve_mdns(
     subscriber: Arc<dyn MdnsSubscriber>,
     resolver: Arc<Keypair>,
     registry: Arc<RwLock<Registry>>,
     registry_path: PathBuf,
     rate_limiter: Arc<AnnounceRateLimiter>,
+    keystore: Arc<crate::identity::Keystore>,
+    connector_cache: Arc<crate::proxy::ConnectorCache>,
+    token_refresher: Arc<dyn crate::pair::token_refresh::BearerTokenRefresher>,
     cancel: CancellationToken,
 ) -> Result<(), SubscribeError> {
     loop {
@@ -255,6 +259,9 @@ pub async fn serve_mdns(
                         &registry,
                         &registry_path,
                         rate_limiter.as_ref(),
+                        &keystore,
+                        &connector_cache,
+                        &token_refresher,
                     )
                     .await;
                 }
@@ -284,12 +291,16 @@ fn next_utc_midnight_instant() -> tokio::time::Instant {
 /// handler's stage ordering — IP rate-limit, parse, LID rate-limit,
 /// apply, persist — and pulls the sealed bytes out of the `body=`
 /// TXT entry first.
+#[allow(clippy::too_many_arguments)] // bridge fan-in; splitting hurts readability
 async fn handle_announcement(
     ann: MdnsAnnouncement,
     resolver: &Keypair,
     registry: &Arc<RwLock<Registry>>,
     registry_path: &std::path::Path,
     rate_limiter: &AnnounceRateLimiter,
+    keystore: &Arc<crate::identity::Keystore>,
+    connector_cache: &Arc<crate::proxy::ConnectorCache>,
+    token_refresher: &Arc<dyn crate::pair::token_refresh::BearerTokenRefresher>,
 ) {
     if !rate_limiter.check_ip(ann.source_addr) {
         debug!(peer = %ann.source_addr, "mDNS announce rejected: per-IP rate limit");
@@ -343,10 +354,17 @@ async fn handle_announcement(
     }
 
     if accepted.auth_rotated {
-        warn!(
-            logical_id = %accepted.logical_id,
-            "mDNS announce signalled bearer-token rotation; §5.7 re-fetch is not yet implemented",
-        );
+        // SPEC §5.7 — refresh the bearer via the well-known control
+        // call and invalidate the proxy's pooled connector. Best-effort.
+        let registry = registry.clone();
+        let keystore = keystore.clone();
+        let cache = connector_cache.clone();
+        let refresher = token_refresher.clone();
+        let lid = accepted.logical_id.clone();
+        tokio::spawn(async move {
+            crate::pair::endpoint::run_token_rotation(lid, registry, keystore, cache, refresher)
+                .await;
+        });
     }
     info!(
         logical_id = %accepted.logical_id,

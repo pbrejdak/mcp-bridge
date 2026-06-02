@@ -43,6 +43,8 @@ use crate::pair::accept::accept_direction_b;
 use crate::pair::backend_verifier::BackendVerifier;
 use crate::pair::invite_register::InviteRegister;
 use crate::pair::loopback_key::LoopbackKey;
+use crate::pair::token_refresh::BearerTokenRefresher;
+use crate::proxy::ConnectorCache;
 use crate::registry::{Registry, ServerPin};
 
 /// Builder for the pair endpoint.
@@ -75,6 +77,13 @@ pub struct PairEndpoint {
     /// Per-IP + per-LID rate limiter applied to the announce endpoint
     /// (SPEC §5.6).
     pub announce_rate_limiter: Arc<AnnounceRateLimiter>,
+    /// Process-wide proxy connector cache; invalidated on accepted
+    /// announces that signal bearer-token rotation so the next request
+    /// rebuilds with the new token (SPEC §5.7).
+    pub connector_cache: Arc<ConnectorCache>,
+    /// Concrete implementation of the SPEC §5.7 control call that
+    /// fetches a new bearer token from the Origin's backend.
+    pub token_refresher: Arc<dyn BearerTokenRefresher>,
 }
 
 /// Install the `ring` rustls crypto provider as the process default.
@@ -116,6 +125,8 @@ impl PairEndpoint {
             sentinel: self.sentinel,
             adapters: self.adapters,
             announce_rate_limiter: self.announce_rate_limiter,
+            connector_cache: self.connector_cache,
+            token_refresher: self.token_refresher,
         })
     }
 }
@@ -139,6 +150,8 @@ pub struct BoundEndpoint {
     sentinel: Sentinel,
     adapters: Arc<Vec<Arc<dyn Adapter>>>,
     announce_rate_limiter: Arc<AnnounceRateLimiter>,
+    connector_cache: Arc<ConnectorCache>,
+    token_refresher: Arc<dyn BearerTokenRefresher>,
 }
 
 impl BoundEndpoint {
@@ -161,6 +174,8 @@ impl BoundEndpoint {
             sentinel: self.sentinel,
             adapters: self.adapters,
             announce_rate_limiter: self.announce_rate_limiter,
+            connector_cache: self.connector_cache,
+            token_refresher: self.token_refresher,
         });
 
         let app: Router = Router::new()
@@ -196,6 +211,8 @@ struct AppState {
     sentinel: Sentinel,
     adapters: Arc<Vec<Arc<dyn Adapter>>>,
     announce_rate_limiter: Arc<AnnounceRateLimiter>,
+    connector_cache: Arc<ConnectorCache>,
+    token_refresher: Arc<dyn BearerTokenRefresher>,
 }
 
 async fn handle_pair(State(state): State<Arc<AppState>>, body: Bytes) -> StatusCode {
@@ -338,13 +355,18 @@ async fn handle_announce(
     }
 
     if accepted.auth_rotated {
-        // SPEC §5.7: re-fetch the bearer token via the pinned backend
-        // and rotate. The control-call shape is governed by the Origin
-        // host application's API and is out of scope for v0.1.
-        warn!(
-            logical_id = %accepted.logical_id,
-            "announce signalled bearer-token rotation; §5.7 re-fetch is not yet implemented",
-        );
+        // SPEC §5.7: re-fetch the bearer token, persist it, invalidate
+        // the proxy's pooled connector. Best-effort — failures here
+        // log warn but the announce itself stays accepted (the seq +
+        // any fp ratchet already committed under the registry write).
+        let registry = state.registry.clone();
+        let keystore = state.keystore.clone();
+        let cache = state.connector_cache.clone();
+        let refresher = state.token_refresher.clone();
+        let lid = accepted.logical_id.clone();
+        tokio::spawn(async move {
+            run_token_rotation(lid, registry, keystore, cache, refresher).await;
+        });
     }
 
     info!(
@@ -355,6 +377,61 @@ async fn handle_announce(
         "announce accepted",
     );
     StatusCode::NO_CONTENT
+}
+
+/// Execute the SPEC §5.7 bearer-token rotation for one pin:
+///   1. Read the current pin (for backend URL + fp) and bearer token.
+///   2. Call the refresher's control call against the pinned backend.
+///   3. Save the returned bearer to the keychain.
+///   4. Invalidate the proxy connector cache so the next request
+///      rebuilds with the fresh token.
+///
+/// Public so the mDNS-bridge task in [`crate::announce::mdns`] can
+/// share the implementation. Failures at any step log warn and return —
+/// the rotation will retry on the next announce that asserts
+/// `auth_rotated=true`.
+pub(crate) async fn run_token_rotation(
+    pin_id: crate::pair::logical_id::LogicalId,
+    registry: Arc<RwLock<Registry>>,
+    keystore: Arc<Keystore>,
+    cache: Arc<ConnectorCache>,
+    refresher: Arc<dyn BearerTokenRefresher>,
+) {
+    let pin = {
+        let reg = registry.read().await;
+        let Some(p) = reg.get(&pin_id).cloned() else {
+            warn!(%pin_id, "token rotation skipped: pin not in registry");
+            return;
+        };
+        p
+    };
+    let current = match keystore.load_bearer_token(&pin_id) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            warn!(%pin_id, "token rotation skipped: no current bearer in keychain");
+            return;
+        }
+        Err(e) => {
+            warn!(error = ?e, %pin_id, "token rotation skipped: keystore load failed");
+            return;
+        }
+    };
+    let new_bearer = match refresher
+        .refresh(&pin.backend_url, pin.backend_fp, &current)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = ?e, %pin_id, "bearer-token refresh failed");
+            return;
+        }
+    };
+    if let Err(e) = keystore.save_bearer_token(&pin_id, &new_bearer) {
+        warn!(error = ?e, %pin_id, "could not persist refreshed bearer token");
+        return;
+    }
+    cache.invalidate(&pin_id);
+    info!(%pin_id, "bearer token refreshed and connector cache invalidated");
 }
 
 /// Failure modes for [`PairEndpoint::bind`] and [`BoundEndpoint::serve`].

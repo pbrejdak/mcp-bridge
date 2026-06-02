@@ -42,6 +42,42 @@ use crate::registry::{PinState, Registry, ServerPin};
 
 use super::connector::{ConnectorError, ForwardRequest, OriginConnector};
 
+/// Process-wide cache of per-Pin OriginConnectors. Lifted out of the
+/// loopback listener's private AppState so the bearer-token-rotation
+/// path (announce::accept signalling `auth_rotated=true`) can drop the
+/// stale entry from outside the proxy module.
+///
+/// Inner mutex is held only for HashMap operations — never across an
+/// `.await`. Per CLAUDE.md §4 we use `std::sync::Mutex` rather than
+/// dragging tokio's async RwLock in for a cheap cache lookup.
+#[allow(missing_debug_implementations)] // OriginConnector is not Debug.
+#[derive(Default)]
+pub struct ConnectorCache {
+    inner: Mutex<HashMap<LogicalId, Arc<OriginConnector>>>,
+}
+
+impl ConnectorCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget any cached connector for `lid`. The next request rebuilds
+    /// from the keystore so the new bearer takes effect.
+    pub fn invalidate(&self, lid: &LogicalId) {
+        let mut guard = self.inner.lock().expect("connector cache mutex");
+        guard.remove(lid);
+    }
+
+    /// Forget every cached connector. Used by `identity.rotate` after
+    /// pins are mass-revoked, so the proxy listener never serves a
+    /// request through a connector that holds a now-revoked token.
+    pub fn clear(&self) {
+        let mut guard = self.inner.lock().expect("connector cache mutex");
+        guard.clear();
+    }
+}
+
 /// Builder for the loopback listener.
 #[allow(missing_debug_implementations)] // Arc<Keystore> is not Debug.
 pub struct LoopbackListener {
@@ -50,6 +86,9 @@ pub struct LoopbackListener {
     pub bind_addr: SocketAddr,
     pub registry: Arc<RwLock<Registry>>,
     pub keystore: Arc<Keystore>,
+    /// Shared connector cache; rotation paths invalidate entries to
+    /// force fresh bearer-token reads on the next request.
+    pub connectors: Arc<ConnectorCache>,
 }
 
 impl LoopbackListener {
@@ -66,7 +105,7 @@ impl LoopbackListener {
             bind_addr: self.bind_addr,
             registry: self.registry,
             keystore: self.keystore,
-            connectors: Mutex::new(HashMap::new()),
+            connectors: self.connectors,
         });
 
         let app: Router = Router::new().fallback(any(handle)).with_state(state);
@@ -91,12 +130,12 @@ impl LoopbackListener {
 }
 
 /// Shared state every request handler reads.
-#[allow(missing_debug_implementations)] // Arc<Keystore> + Mutex are not Debug.
+#[allow(missing_debug_implementations)] // Arc<Keystore> + cache are not Debug.
 struct AppState {
     bind_addr: SocketAddr,
     registry: Arc<RwLock<Registry>>,
     keystore: Arc<Keystore>,
-    connectors: Mutex<HashMap<LogicalId, Arc<OriginConnector>>>,
+    connectors: Arc<ConnectorCache>,
 }
 
 /// Per-request handler implementing SPEC §6.2.
@@ -309,7 +348,7 @@ fn get_or_build_connector(
     pin: &ServerPin,
 ) -> Result<Arc<OriginConnector>, GetConnectorError> {
     {
-        let cache = state.connectors.lock().expect("connectors mutex");
+        let cache = state.connectors.inner.lock().expect("connectors mutex");
         if let Some(c) = cache.get(&pin.logical_id) {
             return Ok(c.clone());
         }
@@ -326,7 +365,7 @@ fn get_or_build_connector(
             .map_err(GetConnectorError::Build)?,
     );
 
-    let mut cache = state.connectors.lock().expect("connectors mutex");
+    let mut cache = state.connectors.inner.lock().expect("connectors mutex");
     let entry = cache.entry(pin.logical_id.clone()).or_insert(connector);
     Ok(entry.clone())
 }

@@ -25,6 +25,7 @@ pub mod payload;
 pub mod rustls_backend_verifier;
 pub mod sas;
 pub mod seal;
+pub mod token_refresh;
 
 pub use accept::{AcceptError, accept_direction_b};
 pub use auth::{Auth, AuthType};
@@ -38,3 +39,6 @@ pub use logical_id::LogicalId;
 pub use nonce::Nonce;
 pub use payload::{BackendInfo, OriginInfo, PairPayload, Scope};
 pub use sas::Sas;
+pub use token_refresh::{
+    BearerTokenRefresher, RefreshError, WellKnownPathRefresher, WELL_KNOWN_REFRESH_PATH,
+};

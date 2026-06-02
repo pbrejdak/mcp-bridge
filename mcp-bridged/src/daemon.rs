@@ -77,6 +77,18 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
     let registry_path_for_ipc = registry_path.clone();
     let registry_path_for_mdns = registry_path.clone();
     let adapters_for_ipc = adapters.clone();
+
+    // Shared between the proxy listener and the bearer-token rotation
+    // path: announce handlers invalidate entries here so the proxy's
+    // next request rebuilds the connector with the rotated bearer
+    // (SPEC §5.7).
+    let connector_cache = Arc::new(crate::proxy::ConnectorCache::new());
+    let connector_cache_for_endpoint = connector_cache.clone();
+    let connector_cache_for_mdns = connector_cache.clone();
+    let token_refresher: Arc<dyn crate::pair::token_refresh::BearerTokenRefresher> =
+        Arc::new(crate::pair::token_refresh::WellKnownPathRefresher);
+    let token_refresher_for_mdns = token_refresher.clone();
+
     let endpoint = PairEndpoint {
         bind_addr: config.bind_addr,
         cert,
@@ -90,6 +102,8 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         sentinel,
         adapters,
         announce_rate_limiter: Arc::new(AnnounceRateLimiter::http_default()),
+        connector_cache: connector_cache_for_endpoint,
+        token_refresher,
     };
     let bound = endpoint.bind()?;
     info!(listening = %bound.local_addr, "pair endpoint bound");
@@ -119,6 +133,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
         bind_addr: config.loopback_addr,
         registry: registry.clone(),
         keystore: keystore.clone(),
+        connectors: connector_cache.clone(),
     };
     let loopback_cancel = cancel.clone();
     let loopback_task = tokio::spawn(async move {
@@ -134,6 +149,7 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
             let subscriber_arc: Arc<dyn crate::announce::MdnsSubscriber> = Arc::new(subscriber);
             let registry_for_mdns = registry.clone();
             let rate_limiter = Arc::new(AnnounceRateLimiter::mdns_default());
+            let keystore_for_mdns = keystore.clone();
             let mdns_cancel = cancel.clone();
             Some(tokio::spawn(async move {
                 if let Err(e) = mdns::serve_mdns(
@@ -142,6 +158,9 @@ pub async fn run(config: Config, cancel: CancellationToken) -> Result<(), Daemon
                     registry_for_mdns,
                     registry_path_for_mdns,
                     rate_limiter,
+                    keystore_for_mdns,
+                    connector_cache_for_mdns,
+                    token_refresher_for_mdns,
                     mdns_cancel,
                 )
                 .await
