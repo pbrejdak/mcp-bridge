@@ -146,13 +146,19 @@ fn install_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit MCP Bridge", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &pair_item, &sep, &quit_item])?;
 
-    let icon = app
-        .default_window_icon()
-        .ok_or_else(|| tauri::Error::AssetNotFound("default window icon".to_owned()))?
-        .clone();
+    // tray.png is a monochrome black-with-alpha bridge silhouette;
+    // marking it as a template image lets macOS tint it to match the
+    // menu-bar foreground (light/dark adaptive). On Windows + Linux
+    // the same image renders as-is.
+    // `from_bytes` parses raw PNG/ICO/etc. bytes at runtime. We
+    // include_bytes! the PNG so it ships inside the binary; no
+    // separate file deployment needed.
+    let icon_bytes = include_bytes!("../icons/tray.png");
+    let icon = tauri::image::Image::from_bytes(icon_bytes)?;
 
     TrayIconBuilder::new()
         .icon(icon)
+        .icon_as_template(true)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_console(app),
