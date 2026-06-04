@@ -38,3 +38,22 @@ Desktop.ini
 
 # Diagnostic dumps (never commit user-collected diagnostic bundles)
 diagnostics-*.zip
+
+# Secret material — defense-in-depth against a stray key/cert export or a
+# daemon accidentally pointed at the repo (e.g. `--data-dir .`). Secrets
+# normally live in the OS keychain / OS data dir and never reach the tree;
+# these patterns make sure they can't be committed if that ever slips.
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+*.crt
+id_ed25519
+id_ed25519.pub
+id_rsa
+id_rsa.pub
+identity.json
+registry.json
+control.sock
+keystore.json
