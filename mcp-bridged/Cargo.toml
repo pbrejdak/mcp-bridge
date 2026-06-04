@@ -39,7 +39,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 futures-core = "0.3"
 hmac = "0.12"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-async-persistent", "async-secret-service", "crypto-rust"] }
-mdns-sd = { version = "0.13", default-features = false, features = ["async"] }
+mdns-sd = { version = "0.20", default-features = false, features = ["async"] }
 qrcode = { version = "0.14", default-features = false }
 rcgen = "0.13"
 rand = "0.8"
