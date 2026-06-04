@@ -280,32 +280,81 @@ async fn run_diagnostics(json_output: bool) -> Result<()> {
 
 /// `mcp-bridge logs [--follow]` — print recent daemon log entries.
 /// Without --follow: prints the last 200 lines and exits. With:
-/// polls every second using the largest seq seen so far as the
-/// cursor, printing new lines as they arrive (Ctrl-C to stop).
+/// opens a `log.subscribe` session, prints the buffered tail once
+/// (via `log.recent` so the historical context is included), then
+/// pushes events from the live broadcast stream as they arrive
+/// (Ctrl-C to stop).
 async fn run_logs(follow: bool, json_output: bool) -> Result<()> {
     let config = Config::defaults().context("resolving default config")?;
     let socket = config.ipc_socket_path();
 
     let initial = fetch_logs(&socket, None).await?;
-    let mut cursor = print_events(&initial.events, json_output)?;
+    let _ = print_events(&initial.events, json_output)?;
 
     if !follow {
         return Ok(());
     }
 
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // --follow: open a fresh connection for the subscription. The
+    // daemon writes one ack response then notification frames; we
+    // print each notification's payload until Ctrl-C or daemon shutdown.
+    follow_logs(&socket, json_output).await
+}
+
+/// Open a `log.subscribe` connection and print incoming notifications.
+async fn follow_logs(socket: &std::path::Path, json_output: bool) -> Result<()> {
+    use mcp_bridged::observability::recorder::LogEvent;
+
+    let mut stream = ipc::open_local(socket)
+        .await
+        .map_err(|e| anyhow!("could not open IPC for log.subscribe: {e}"))?;
+
+    let request = ipc::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: serde_json::json!("logs-sub"),
+        method: ipc::method_names::LOG_SUBSCRIBE.to_owned(),
+        params: None,
+    };
+    ipc::write_frame(&mut stream, &request)
+        .await
+        .map_err(|e| anyhow!("subscribe write: {e}"))?;
+    let initial: ipc::JsonRpcResponse = ipc::read_frame(&mut stream)
+        .await
+        .map_err(|e| anyhow!("subscribe ack: {e}"))?;
+    if let Some(err) = initial.error {
+        bail!("daemon returned error {}: {}", err.code, err.message);
+    }
+
     loop {
         tokio::select! {
             ctrl = tokio::signal::ctrl_c() => {
                 ctrl.map_err(|e| anyhow!("Ctrl-C handler: {e}"))?;
                 return Ok(());
             }
-            _ = interval.tick() => {}
-        }
-        let next = fetch_logs(&socket, cursor).await?;
-        if let Some(last) = print_events(&next.events, json_output)? {
-            cursor = Some(last);
+            frame = ipc::read_frame::<_, ipc::JsonRpcNotification>(&mut stream) => {
+                let frame = match frame {
+                    Ok(f) => f,
+                    Err(e) => {
+                        // Daemon closed the connection — common on
+                        // graceful shutdown. Don't treat as a CLI
+                        // error; exit cleanly.
+                        tracing::debug!(error = ?e, "log.subscribe stream ended");
+                        return Ok(());
+                    }
+                };
+                if frame.method != ipc::method_names::LOG_ENTRY_NOTIFICATION {
+                    continue;
+                }
+                let Some(params) = frame.params else { continue };
+                let event: LogEvent = match serde_json::from_value(params) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::debug!(error = ?e, "could not parse log notification");
+                        continue;
+                    }
+                };
+                let _ = print_events(std::slice::from_ref(&event), json_output)?;
+            }
         }
     }
 }

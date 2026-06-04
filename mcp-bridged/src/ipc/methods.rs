@@ -41,6 +41,15 @@ pub mod method_names {
     pub const IDENTITY_SHOW: &str = "identity.show";
     pub const IDENTITY_ROTATE: &str = "identity.rotate";
     pub const LOG_RECENT: &str = "log.recent";
+    /// Subscribe to the live log-event stream. The server returns one
+    /// success response immediately, then keeps the connection open
+    /// and pushes one `log.entry` JSON-RPC notification per event
+    /// until the client disconnects or the daemon cancels. Handled by
+    /// `ipc::server` directly — never reaches the [`dispatch`] arm.
+    pub const LOG_SUBSCRIBE: &str = "log.subscribe";
+    /// Notification method name pushed server → client during a
+    /// `log.subscribe` session. params = one [`super::LogEvent`].
+    pub const LOG_ENTRY_NOTIFICATION: &str = "log.entry";
     pub const DIAGNOSTICS_BUNDLE: &str = "diagnostics.bundle";
     pub const UPDATE_CHECK: &str = "update.check";
 }

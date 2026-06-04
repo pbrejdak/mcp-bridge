@@ -18,14 +18,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tracing::{Event, Subscriber};
+use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
 /// Maximum number of events retained in the ring buffer. The oldest
 /// entries fall off the back as new ones arrive.
 pub const BUFFER_CAP: usize = 1024;
+
+/// Capacity of the broadcast channel for live subscribers. Lagging
+/// receivers see `RecvError::Lagged` and the channel drops the oldest
+/// queued events — preferred behaviour over blocking the producer.
+pub const BROADCAST_CAP: usize = 256;
 
 /// A single captured log event in the form the IPC surface returns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +61,11 @@ pub struct EventRecorder {
 struct Inner {
     buffer: Mutex<VecDeque<LogEvent>>,
     next_seq: AtomicU64,
+    /// Broadcast sender for live `log.subscribe` clients. `send` is
+    /// fire-and-forget — it never blocks; if no subscriber is alive
+    /// the event is dropped on the broadcast side, the ring buffer
+    /// still keeps it.
+    tx: broadcast::Sender<LogEvent>,
 }
 
 impl Default for EventRecorder {
@@ -66,12 +77,23 @@ impl Default for EventRecorder {
 impl EventRecorder {
     #[must_use]
     pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(BROADCAST_CAP);
         Self {
             inner: Arc::new(Inner {
                 buffer: Mutex::new(VecDeque::with_capacity(BUFFER_CAP)),
                 next_seq: AtomicU64::new(1),
+                tx,
             }),
         }
+    }
+
+    /// Subscribe to the live event broadcast. Returns a `tokio` broadcast
+    /// receiver yielding every event captured by the tracing Layer
+    /// after the call; historical events stay in the ring buffer
+    /// (see [`recent`](Self::recent)) and are NOT replayed.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEvent> {
+        self.inner.tx.subscribe()
     }
 
     /// Return up to `limit` events whose seq is strictly greater than
@@ -92,15 +114,23 @@ impl EventRecorder {
         }
     }
 
-    /// Push one captured event. Visible to the Layer impl below and to
-    /// crate-internal tests; the Layer is the production path.
-    pub(crate) fn push(&self, mut event: LogEvent) {
+    /// Push one captured event directly into the ring buffer + the
+    /// live broadcast. The Layer impl below is the production path;
+    /// this is `pub` so integration tests can synthesize events
+    /// without installing the tracing subscriber.
+    #[doc(hidden)]
+    pub fn push(&self, mut event: LogEvent) {
         event.seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
         let mut buffer = self.inner.buffer.lock().expect("recorder mutex poisoned");
         if buffer.len() == BUFFER_CAP {
             buffer.pop_front();
         }
-        buffer.push_back(event);
+        buffer.push_back(event.clone());
+        drop(buffer);
+        // Broadcast is fire-and-forget; `send` errors only when no
+        // receivers are alive, which is the common case (nobody is
+        // following) — log.subscribe clients are rare.
+        let _ = self.inner.tx.send(event);
     }
 }
 

@@ -23,6 +23,28 @@ pub struct JsonRpcRequest {
     pub params: Option<serde_json::Value>,
 }
 
+/// JSON-RPC 2.0 notification envelope — a request without an `id`,
+/// flowing server → client. Used by [`log.subscribe`](super::methods)
+/// to push events as they arrive without a paired request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+impl JsonRpcNotification {
+    #[must_use]
+    pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_owned(),
+            method: method.into(),
+            params: Some(params),
+        }
+    }
+}
+
 /// JSON-RPC 2.0 successful response envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {

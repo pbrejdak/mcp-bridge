@@ -170,6 +170,14 @@ async fn handle_unix_connection(
             },
         };
 
+        // Subscription methods short-circuit the dispatch path —
+        // after the initial success response the server pushes
+        // notification frames until the client disconnects.
+        if req.method == super::methods::method_names::LOG_SUBSCRIBE {
+            run_log_subscribe(&mut writer, req.id, &ctx, &cancel).await;
+            return;
+        }
+
         let resp = dispatch(req, &ctx).await;
 
         if let Err(e) = write_frame(&mut writer, &resp).await {
@@ -179,6 +187,188 @@ async fn handle_unix_connection(
         // Loop — keep the connection open for further requests until
         // the peer closes (which surfaces as UnexpectedEof on the next
         // read_frame).
+    }
+}
+
+/// Drive a `log.subscribe` session: write the initial success
+/// response, then push one [`super::wire::JsonRpcNotification`] frame
+/// per broadcast event until the client disconnects or `cancel`
+/// fires. Used by both the Unix-socket and Windows-named-pipe
+/// connection handlers — the writer trait bounds keep them generic.
+async fn run_log_subscribe<W>(
+    writer: &mut W,
+    req_id: serde_json::Value,
+    ctx: &Context,
+    cancel: &CancellationToken,
+) where
+    W: tokio::io::AsyncWriteExt + Unpin,
+{
+    use super::wire::{JsonRpcNotification, JsonRpcResponse, write_frame};
+
+    // Initial response: empty object, ack. The client knows the
+    // method is a subscription and now expects notification frames.
+    let initial = JsonRpcResponse::success(req_id, serde_json::json!({}));
+    if let Err(e) = write_frame(writer, &initial).await {
+        warn!(error = ?e, "log.subscribe initial response failed");
+        return;
+    }
+
+    let Some(recorder) = ctx.recorder.as_ref() else {
+        // No recorder installed (some integration tests skip the
+        // observability layer). Politely close.
+        debug!("log.subscribe: no recorder installed; closing connection");
+        return;
+    };
+    let mut rx = recorder.subscribe();
+
+    loop {
+        let event = tokio::select! {
+            () = cancel.cancelled() => {
+                debug!("log.subscribe: daemon shutting down");
+                return;
+            }
+            recv = rx.recv() => recv,
+        };
+
+        let event = match event {
+            Ok(e) => e,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                // Subscriber fell behind. Send a synthetic event
+                // telling the client some entries were skipped, then
+                // continue. This is preferable to dropping the
+                // connection: a busy console might briefly fall
+                // behind during a log burst.
+                let synth = JsonRpcNotification::new(
+                    super::methods::method_names::LOG_ENTRY_NOTIFICATION,
+                    serde_json::json!({
+                        "seq": 0,
+                        "timestamp": 0,
+                        "level": "WARN",
+                        "target": "ipc.log_subscribe",
+                        "message": format!("log.subscribe lagged: {skipped} events dropped"),
+                    }),
+                );
+                if write_frame(writer, &synth).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                debug!("log.subscribe: broadcast channel closed");
+                return;
+            }
+        };
+
+        let params = match serde_json::to_value(&event) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = ?e, "could not serialize log event for subscribe");
+                continue;
+            }
+        };
+        let frame = JsonRpcNotification::new(
+            super::methods::method_names::LOG_ENTRY_NOTIFICATION,
+            params,
+        );
+        if write_frame(writer, &frame).await.is_err() {
+            // Client closed or pipe broken — exit cleanly.
+            debug!("log.subscribe: write failed; assuming client disconnected");
+            return;
+        }
+    }
+}
+
+/// Open a raw, bidirectional connection to the running daemon's IPC
+/// endpoint. Used by callers that need to keep the connection alive
+/// for multiple frames (e.g. `log.subscribe` subscriptions). Picks the
+/// transport at compile time to match [`serve`].
+pub async fn open_local(path: &Path) -> Result<LocalStream, super::wire::FrameError> {
+    #[cfg(unix)]
+    {
+        let stream = tokio::net::UnixStream::connect(path)
+            .await
+            .map_err(super::wire::FrameError::Io)?;
+        Ok(LocalStream::Unix(stream))
+    }
+    #[cfg(windows)]
+    {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        let pipe = ClientOptions::new()
+            .open(path.as_os_str())
+            .map_err(super::wire::FrameError::Io)?;
+        Ok(LocalStream::Windows(pipe))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(super::wire::FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "IPC client is not implemented on this platform",
+        )))
+    }
+}
+
+/// Owned bidirectional handle to the daemon's IPC endpoint. Returned
+/// by [`open_local`]; the inner transport is platform-specific.
+#[allow(missing_debug_implementations)] // tokio stream types aren't Debug.
+pub enum LocalStream {
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+    #[cfg(windows)]
+    Windows(tokio::net::windows::named_pipe::NamedPipeClient),
+}
+
+// AsyncRead / AsyncWrite forwarding so `read_frame` / `write_frame`
+// can operate on LocalStream directly.
+impl tokio::io::AsyncRead for LocalStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            #[cfg(windows)]
+            Self::Windows(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for LocalStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            #[cfg(windows)]
+            Self::Windows(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(s) => std::pin::Pin::new(s).poll_flush(cx),
+            #[cfg(windows)]
+            Self::Windows(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            #[cfg(windows)]
+            Self::Windows(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
     }
 }
 
@@ -317,6 +507,11 @@ async fn handle_windows_connection(
                 }
             },
         };
+
+        if req.method == super::methods::method_names::LOG_SUBSCRIBE {
+            run_log_subscribe(&mut writer, req.id, &ctx, &cancel).await;
+            return;
+        }
 
         let resp = dispatch(req, &ctx).await;
 

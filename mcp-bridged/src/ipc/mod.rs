@@ -18,5 +18,8 @@ pub use methods::{
 };
 #[cfg(unix)]
 pub use server::call_unix;
-pub use server::{IpcError, call_local, serve};
-pub use wire::{FrameError, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MAX_FRAME_LEN};
+pub use server::{IpcError, LocalStream, call_local, open_local, serve};
+pub use wire::{
+    FrameError, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    MAX_FRAME_LEN, read_frame, write_frame,
+};
