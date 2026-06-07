@@ -1,0 +1,6 @@
+{
+  "name": "empty-containers",
+  "description": "Sanity: empty object and empty array each canonicalize to their two-byte literal form.",
+  "input": { "obj": {}, "arr": [] },
+  "canonical": "{\"arr\":[],\"obj\":{}}"
+}

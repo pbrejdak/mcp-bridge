@@ -1,0 +1,12 @@
+{
+  "name": "nested-structures",
+  "description": "Sorting applies recursively to every object, and array order is preserved at every depth.",
+  "input": {
+    "outer": {
+      "z": 1,
+      "a": [3, 2, 1],
+      "m": { "y": true, "x": null }
+    }
+  },
+  "canonical": "{\"outer\":{\"a\":[3,2,1],\"m\":{\"x\":null,\"y\":true},\"z\":1}}"
+}

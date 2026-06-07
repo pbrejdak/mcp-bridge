@@ -152,6 +152,17 @@ under [`mcp-bridge-mobile/core/`](mcp-bridge-mobile/core/)):
   layout, the float-rejection contract, and announce-payload-shaped
   parity with the daemon's `serde_jcs::to_vec` output. All 12 green
   on JVM + Android Debug + Android Release + iOS simulator arm64.
+- **Cross-language canonical-JSON conformance fixtures** in
+  [`test-vectors/canonical/`](test-vectors/canonical/) (6 cases:
+  empty containers, key sorting, nested structures, the seven JCS
+  string escapes, Unicode passthrough including a surrogate pair, and
+  an announce-payload-shaped object). Two runners walk the same files
+  and assert byte-equal output: the Rust daemon's
+  [`canonical_conformance.rs`](mcp-bridged/tests/canonical_conformance.rs)
+  via `serde_jcs::to_vec`, and the Kotlin core's
+  [`CanonicalConformanceTest`](mcp-bridge-mobile/core/src/jvmTest/kotlin/dev/mcpbridge/mobile/canonical/CanonicalConformanceTest.kt)
+  via `CanonicalJson.encodeToBytes`. Both green; drift between them
+  surfaces at fixture time, not at runtime in someone's living room.
 
 Existing design/policy documentation set:
 

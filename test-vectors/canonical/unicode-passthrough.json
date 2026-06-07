@@ -1,0 +1,10 @@
+{
+  "name": "unicode-passthrough",
+  "description": "Non-ASCII characters are emitted verbatim in their UTF-8 byte sequence. Supplementary-plane code points (surrogate pairs in UTF-16) round-trip. Object keys still sort by UTF-16 code unit: 'crab' < 'currency' < 'greeting'.",
+  "input": {
+    "currency": "€",
+    "crab": "🦀",
+    "greeting": "hola, señor"
+  },
+  "canonical": "{\"crab\":\"🦀\",\"currency\":\"€\",\"greeting\":\"hola, señor\"}"
+}

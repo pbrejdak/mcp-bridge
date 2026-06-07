@@ -1,0 +1,6 @@
+{
+  "name": "key-sorting",
+  "description": "Object keys are sorted ascending by UTF-16 code unit, not by locale. 'Z' (U+005A) sorts before 'a' (U+0061), and a sorts before b.",
+  "input": { "b": 3, "a": 1, "Z": 2 },
+  "canonical": "{\"Z\":2,\"a\":1,\"b\":3}"
+}

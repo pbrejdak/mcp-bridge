@@ -1,0 +1,14 @@
+{
+  "name": "announce-payload",
+  "description": "An mcp-announce/v0.1-shaped object with seven fields, including the keys that appear in real announce signatures: auth_rotated_at, exp, lid, loop_key, origin, seq, spec. The canonical form is what the daemon's serde_jcs::to_vec emits and what Ed25519_Sign covers.",
+  "input": {
+    "spec": "mcp-announce/v0.1",
+    "origin": "ed25519:abc",
+    "lid": "bodylog-7f3a",
+    "seq": 42,
+    "exp": 1700000060,
+    "loop_key": "base64url-stuff",
+    "auth_rotated_at": 1700000000
+  },
+  "canonical": "{\"auth_rotated_at\":1700000000,\"exp\":1700000060,\"lid\":\"bodylog-7f3a\",\"loop_key\":\"base64url-stuff\",\"origin\":\"ed25519:abc\",\"seq\":42,\"spec\":\"mcp-announce/v0.1\"}"
+}

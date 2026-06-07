@@ -1,0 +1,8 @@
+{
+  "name": "string-escapes",
+  "description": "The seven JCS shorthand escapes (\\b \\t \\n \\f \\r \\\" \\\\) are emitted as shorthands. ASCII controls without shorthands (here U+0001) use \\u00XX in lowercase hex. The slash character U+002F is NOT escaped per RFC 8785 section 3.2.2.2. U+007F (DEL) is NOT in the JCS escape set and passes through verbatim.",
+  "input": {
+    "s": "\u0001\b\t\n\f\r\"\\/\u007f"
+  },
+  "canonical": "{\"s\":\"\\u0001\\b\\t\\n\\f\\r\\\"\\\\/\u007f\"}"
+}
