@@ -163,6 +163,29 @@ under [`mcp-bridge-mobile/core/`](mcp-bridge-mobile/core/)):
   [`CanonicalConformanceTest`](mcp-bridge-mobile/core/src/jvmTest/kotlin/dev/mcpbridge/mobile/canonical/CanonicalConformanceTest.kt)
   via `CanonicalJson.encodeToBytes`. Both green; drift between them
   surfaces at fixture time, not at runtime in someone's living room.
+- **ADR 0006 — KMP crypto stack** ([`docs/decisions/0006-kmp-crypto-stack.md`](docs/decisions/0006-kmp-crypto-stack.md)).
+  Hybrid stack: Apple CryptoKit for keyed crypto on iOS (Secure Enclave
+  where available), BouncyCastle for the libsodium primitives on
+  JVM/Android, upstream libsodium framework on iOS for the
+  XSalsa20-Poly1305 inside `crypto_box`. Pure-Kotlin in `commonMain`
+  for unkeyed hashes (SHA-256) and the Edwards-to-Montgomery map.
+  Accepted.
+- **Pure-Kotlin SHA-256** in
+  `commonMain/crypto/Sha256.kt` (FIPS 180-4 §6.2), with a streaming
+  `State` for callers that need to feed multiple buffers. Five tests
+  cover the FIPS empty / "abc" / two-block / million-A vectors plus
+  the 48-byte all-zeros input that drives the SAS KAT. Green on JVM,
+  Android Debug, Android Release, and iOS simulator arm64.
+- **SAS derivation** in `commonMain/sas/SasDerivation.kt`
+  ([`docs/SPEC.md`](docs/SPEC.md) §4.2). The SAS phrase comparison is
+  the user-facing security control during pairing — Kotlin and Rust
+  must agree on it byte-for-byte. The 2048-word BIP39 wordlist is
+  generated into `SasWordlist.kt` from
+  [`test-vectors/sas-wordlist-v1.txt`](test-vectors/sas-wordlist-v1.txt)
+  by a Gradle task at build time, so the SDK ships with the same
+  source of truth the daemon's `accept-canonical.json` fixture pins.
+  KAT verified: all-zero pubkey + all-zero nonce → `voyage-sentence-voyage-deny`
+  on every target.
 
 Existing design/policy documentation set:
 

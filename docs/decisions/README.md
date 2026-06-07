@@ -39,3 +39,4 @@ Do not write one for routine library choices (logger, formatter, helper crate) â
 | [0003](0003-kmp-for-mobile-core.md) | Accepted | Kotlin Multiplatform for the mobile SDK core |
 | [0004](0004-dco-over-cla.md) | Accepted | Developer Certificate of Origin over a Contributor License Agreement |
 | [0005](0005-path-b-per-platform-icons.md) | Accepted | Path B â€” per-platform native icon sets |
+| [0006](0006-kmp-crypto-stack.md) | Accepted | KMP crypto stack for the Bridge Peer SDK |
