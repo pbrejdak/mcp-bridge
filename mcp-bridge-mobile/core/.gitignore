@@ -1,0 +1,19 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+local.properties
+
+# Kotlin / KMP / Native
+.kotlin/
+kotlin-js-store/
+xcuserdata/
+*.xcuserstate
+
+# OS
+.DS_Store

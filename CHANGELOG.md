@@ -118,6 +118,30 @@ Vite + TypeScript under [`bridge-console/`](bridge-console/)):
   with backdrop+Escape) and shared `app.css` with design tokens +
   button variants.
 
+Phase 4 (`mcp-bridge-mobile/` — Kotlin Multiplatform protocol core
+under [`mcp-bridge-mobile/core/`](mcp-bridge-mobile/core/)):
+
+- **KMP Gradle scaffold** — `settings.gradle.kts` + `build.gradle.kts`
+  + version catalog at `gradle/libs.versions.toml`. Targets enabled:
+  `jvm()`, `androidTarget()`, `iosArm64()`, `iosSimulatorArm64()`,
+  `iosX64()`. Gradle 8.14.3 (wrapper checked in), Kotlin 2.1.21,
+  Android Gradle Plugin 8.7.3. compileSdk 34, minSdk 26 per
+  [`docs/MOBILE.md`](docs/MOBILE.md) §7.1.
+- **`commonMain` protocol models** — `OriginConfig`, `ServerConfig`,
+  `Scope`, `ResolverInvite`, `ResolverPin`. All `@Serializable`.
+  No cryptography yet.
+- **`commonTest`** with `kotlin.test` runs on JVM + Android Debug +
+  Android Release; first two sanity assertions green across all
+  three targets.
+- **iOS framework link verified** for `iosSimulatorArm64`. Other iOS
+  targets wired in but their first link is deferred until local disk
+  pressure clears (Kotlin/Native intermediates are ~hundreds of MB
+  per target).
+- **READMEs** at [`mcp-bridge-mobile/README.md`](mcp-bridge-mobile/README.md)
+  (workspace orientation) and
+  [`mcp-bridge-mobile/core/README.md`](mcp-bridge-mobile/core/README.md)
+  (KMP build + tooling notes).
+
 Existing design/policy documentation set:
 
 - Documentation set under [`docs/`](docs/):

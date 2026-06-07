@@ -1,0 +1,27 @@
+# Version catalog for the Bridge Peer KMP core.
+#
+# Pinned versions are intentional — bumping these requires re-running
+# the conformance test vectors against the resulting binaries (see
+# docs/MOBILE.md §12 / test-vectors/).
+
+[versions]
+kotlin = "2.1.21"
+kotlinx-serialization = "1.7.3"
+kotlinx-coroutines = "1.9.0"
+kotlinx-datetime = "0.6.1"
+android-gradle = "8.7.3"
+android-compile-sdk = "34"
+android-min-sdk = "26"
+android-target-sdk = "34"
+jvm-target = "17"
+
+[libraries]
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinx-datetime" }
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+android-library = { id = "com.android.library", version.ref = "android-gradle" }
