@@ -141,6 +141,17 @@ under [`mcp-bridge-mobile/core/`](mcp-bridge-mobile/core/)):
   (workspace orientation) and
   [`mcp-bridge-mobile/core/README.md`](mcp-bridge-mobile/core/README.md)
   (KMP build + tooling notes).
+- **RFC 8785 (JCS) canonical-JSON encoder** in
+  `commonMain/canonical/CanonicalJson.kt` — the byte sequence
+  signatures are computed over per [`docs/SPEC.md`](docs/SPEC.md) §3.3.
+  Integer-only numeric support (the two MCP Bridge wire protocols
+  carry no floats); object keys sorted by UTF-16 code unit; only the
+  seven JCS shorthand string escapes + `\u00XX` for the remaining
+  ASCII controls. 12 unit tests in `commonTest` cover key sorting,
+  string escapes, nested structures, Unicode keys/values, UTF-8 byte
+  layout, the float-rejection contract, and announce-payload-shaped
+  parity with the daemon's `serde_jcs::to_vec` output. All 12 green
+  on JVM + Android Debug + Android Release + iOS simulator arm64.
 
 Existing design/policy documentation set:
 
