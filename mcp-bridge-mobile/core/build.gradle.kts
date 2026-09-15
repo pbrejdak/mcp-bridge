@@ -54,6 +54,14 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+        // BouncyCastle on every JVM-flavored target (per ADR 0006).
+        // iOS goes through libsodium / CryptoKit in a later commit.
+        jvmMain.dependencies {
+            implementation(libs.bouncycastle)
+        }
+        androidMain.dependencies {
+            implementation(libs.bouncycastle)
+        }
     }
 }
 
